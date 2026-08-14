@@ -1,0 +1,35 @@
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Drawing</title>
+    <script>
+      window.EXCALIDRAW_ASSET_PATH = new URL("./", document.baseURI || document.location.href).href;
+      try {
+        Object.defineProperty(document.fonts, "ready", {
+          configurable: true,
+          get() {
+            return Promise.resolve(document.fonts);
+          },
+        });
+      } catch (e) {}
+    </script>
+    <style>
+      html, body, #root {
+        margin: 0;
+        height: 100%;
+        width: 100%;
+        overflow: hidden;
+      }
+      /* WKWebView can hang on FontFace loads; overlay would stay forever. */
+      .LoadingMessage {
+        display: none !important;
+      }
+    </style>
+    <script type="module" src="./assets/index-BsYG54uW.js"></script>
+  </head>
+  <body>
+    <div id="root">Loading drawing…</div>
+  </body>
+</html>

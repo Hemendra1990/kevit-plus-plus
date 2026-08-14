@@ -1,0 +1,13 @@
+# SwiftPM build products (includes the assembled .app and dependency checkouts)
+.build/
+
+# macOS
+.DS_Store
+
+# Local working notes (kept on disk, not published)
+CLAUDE.md
+HANDOFF.md
+
+# Excalidraw host toolchain
+Scripts/excalidraw-host/node_modules/
+Scripts/excalidraw-host/package-lock.json
