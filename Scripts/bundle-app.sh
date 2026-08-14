@@ -47,5 +47,16 @@ while IFS= read -r bundle; do
   cp -R "$bundle" "$APP_DIR/Contents/Resources/" 2>/dev/null || true
 done < <(find "$ROOT/.build" -type d -name "*.bundle" 2>/dev/null | head -50)
 
+# The executable arrives linker-signed with no resource seal, so adding Info.plist
+# and Resources/ invalidates it ("code has no resources but signature indicates they
+# must be present"). A broken seal makes a downloaded copy fail as "damaged" with no
+# Open Anyway option, so re-sign the assembled bundle. Ad-hoc unless CODESIGN_IDENTITY
+# names a real identity, in which case pass it through for a signed/notarizable build.
+IDENTITY="${CODESIGN_IDENTITY:--}"
+echo "Signing bundle (identity: ${IDENTITY})..."
+codesign --force --deep --sign "$IDENTITY" "$APP_DIR"
+codesign --verify --deep --strict "$APP_DIR"
+echo "Signature verified."
+
 echo "Built app: $APP_DIR"
 echo "Run with: open \"$APP_DIR\""
