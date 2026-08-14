@@ -47,6 +47,11 @@ while IFS= read -r bundle; do
   cp -R "$bundle" "$APP_DIR/Contents/Resources/" 2>/dev/null || true
 done < <(find "$ROOT/.build" -type d -name "*.bundle" 2>/dev/null | head -50)
 
+# Tree-sitter query files come out of the SwiftPM checkout mode 444, and ditto
+# preserves that into the archive. A user who downloads the app then cannot run
+# `xattr -dr com.apple.quarantine` over it without a wall of permission errors.
+chmod -R u+w "$APP_DIR"
+
 # The executable arrives linker-signed with no resource seal, so adding Info.plist
 # and Resources/ invalidates it ("code has no resources but signature indicates they
 # must be present"). A broken seal makes a downloaded copy fail as "damaged" with no
