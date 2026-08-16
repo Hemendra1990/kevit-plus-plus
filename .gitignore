@@ -7,3 +7,6 @@
 # Excalidraw host toolchain
 Scripts/excalidraw-host/node_modules/
 Scripts/excalidraw-host/package-lock.json
+
+# App icon build output
+Scripts/app-icon/out/
