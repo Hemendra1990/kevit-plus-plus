@@ -10,6 +10,12 @@ Built with **Swift + AppKit**, **STTextView** (TextKit 2), and **Tree-sitter** s
 - Classic icon toolbar (New/Open/Save/Save All/Close/Edit/Find/Zoom/Macro)
 - Multi-tab with ×, file icon, right-click tab menu
 - Language menu A–Z groups: 40+ languages (Tree-sitter highlight for ~20)
+- Markdown preview (⇧⌘V) with live re-render, syntax-highlighted code blocks, styled tables, callouts, checklists, light/dark themes — and Export HTML… that matches the preview exactly
+- Markdown modes: Code / Split / Preview (⌥⌘1–3), draggable divider, vertical split on narrow windows, fullscreen preview (⌥⌘F), and automatic Markdown detection for extension-less files
+- HTML viewer and JSON tree viewer in the same preview pane (with search, collapse/expand, and type badges)
+- Side-by-side comparator with synced scrolling, add/remove/modify highlighting, and structural JSON diffing with change paths (Compare Snippets…, Text/JSON modes)
+- Format / Minify / Validate JSON (⌥⌘L, ⌥⌘M)
+- Click the empty area of the tab strip to open a new tab
 - Plus all v1.3 features (FTP, plugins, compare, sessions, macros, …)
 
 ## Requirements
@@ -62,6 +68,11 @@ swift run LogicTests
 | Column mode | ⇧⌘C |
 | Document map | ⇧⌘M |
 | Function list | ⇧⌘F |
+| Markdown: toggle split | ⇧⌘V |
+| Markdown: Code / Split / Preview | ⌥⌘1 / ⌥⌘2 / ⌥⌘3 |
+| Markdown: fullscreen preview | ⌥⌘F (Esc exits) |
+| Format JSON | ⌥⌘L |
+| Minify JSON | ⌥⌘M |
 | Toggle bookmark | ⇧⌘B |
 | Playback macro | ⇧⌘P |
 | Print | ⌘P |

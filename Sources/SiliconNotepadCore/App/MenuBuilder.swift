@@ -55,6 +55,7 @@ enum MenuBuilder {
         file.addItem(NSMenuItem.separator())
         file.addItem(withTitle: "Export PNG…", action: #selector(MainWindowController.exportDrawingPNG(_:)), keyEquivalent: "")
         file.addItem(withTitle: "Export SVG…", action: #selector(MainWindowController.exportDrawingSVG(_:)), keyEquivalent: "")
+        file.addItem(withTitle: "Export HTML…", action: #selector(MainWindowController.exportMarkdownHTML(_:)), keyEquivalent: "")
         file.addItem(NSMenuItem.separator())
         file.addItem(withTitle: "Save Session…", action: #selector(MainWindowController.saveSession(_:)), keyEquivalent: "")
         file.addItem(withTitle: "Load Session…", action: #selector(MainWindowController.loadSession(_:)), keyEquivalent: "")
@@ -121,6 +122,11 @@ enum MenuBuilder {
         edit.addItem(NSMenuItem.separator())
         edit.addItem(withTitle: "Toggle Comment", action: #selector(MainWindowController.toggleComment(_:)), keyEquivalent: "/")
         if let item = edit.items.last { item.keyEquivalentModifierMask = [.command] }
+        edit.addItem(withTitle: "Format JSON", action: #selector(MainWindowController.formatJSON(_:)), keyEquivalent: "l")
+        if let item = edit.items.last { item.keyEquivalentModifierMask = [.command, .option] }
+        edit.addItem(withTitle: "Minify JSON", action: #selector(MainWindowController.minifyJSON(_:)), keyEquivalent: "m")
+        if let item = edit.items.last { item.keyEquivalentModifierMask = [.command, .option] }
+        edit.addItem(withTitle: "Validate JSON", action: #selector(MainWindowController.validateJSON(_:)), keyEquivalent: "")
         edit.addItem(withTitle: "Delete Line", action: #selector(MainWindowController.deleteLine(_:)), keyEquivalent: "l")
         if let item = edit.items.last { item.keyEquivalentModifierMask = [.command, .shift] }
         edit.addItem(withTitle: "UPPERCASE", action: #selector(MainWindowController.uppercaseSelection(_:)), keyEquivalent: "u")
@@ -179,11 +185,37 @@ enum MenuBuilder {
         if let item = view.items.last { item.keyEquivalentModifierMask = [.command, .shift] }
         view.addItem(withTitle: "Function List", action: #selector(MainWindowController.toggleFunctionList(_:)), keyEquivalent: "f")
         if let item = view.items.last { item.keyEquivalentModifierMask = [.command, .shift] }
+        view.addItem(withTitle: "Toggle Markdown Split", action: #selector(MainWindowController.toggleMarkdownPreview(_:)), keyEquivalent: "v")
+        if let item = view.items.last { item.keyEquivalentModifierMask = [.command, .shift] }
+
+        let mdModeItem = NSMenuItem(title: "Markdown Mode", action: nil, keyEquivalent: "")
+        let mdModeMenu = NSMenu(title: "Markdown Mode")
+        for (index, mode) in MarkdownViewMode.allCases.enumerated() {
+            let item = NSMenuItem(
+                title: mode.label,
+                action: #selector(MainWindowController.setMarkdownModeCommand(_:)),
+                keyEquivalent: String(index + 1)
+            )
+            item.keyEquivalentModifierMask = [.command, .option]
+            item.representedObject = mode.rawValue
+            mdModeMenu.addItem(item)
+        }
+        mdModeMenu.addItem(NSMenuItem.separator())
+        let fullscreen = NSMenuItem(
+            title: "Fullscreen Preview",
+            action: #selector(MainWindowController.toggleFullscreenPreview(_:)),
+            keyEquivalent: "f"
+        )
+        fullscreen.keyEquivalentModifierMask = [.command, .option]
+        mdModeMenu.addItem(fullscreen)
+        mdModeItem.submenu = mdModeMenu
+        view.addItem(mdModeItem)
         view.addItem(withTitle: "Show Symbol Characters", action: #selector(MainWindowController.toggleInvisibleCharacters(_:)), keyEquivalent: "")
         view.addItem(withTitle: "Show Toolbar", action: #selector(MainWindowController.toggleToolbar(_:)), keyEquivalent: "")
         view.addItem(NSMenuItem.separator())
         view.addItem(withTitle: "Compare with Next Tab", action: #selector(MainWindowController.compareWithNextTab(_:)), keyEquivalent: "")
         view.addItem(withTitle: "Compare Two Files…", action: #selector(MainWindowController.compareOpenFiles(_:)), keyEquivalent: "")
+        view.addItem(withTitle: "Compare Snippets…", action: #selector(MainWindowController.compareSnippets(_:)), keyEquivalent: "")
         view.addItem(NSMenuItem.separator())
         view.addItem(withTitle: "Zoom In", action: #selector(MainWindowController.zoomIn(_:)), keyEquivalent: "=")
         view.addItem(withTitle: "Zoom Out", action: #selector(MainWindowController.zoomOut(_:)), keyEquivalent: "-")
@@ -301,6 +333,9 @@ enum MenuBuilder {
             #selector(MainWindowController.toggleLineNumbers(_:)),
             #selector(MainWindowController.toggleDocumentMap(_:)),
             #selector(MainWindowController.toggleFunctionList(_:)),
+            #selector(MainWindowController.toggleMarkdownPreview(_:)),
+            #selector(MainWindowController.setMarkdownModeCommand(_:)),
+            #selector(MainWindowController.toggleFullscreenPreview(_:)),
             #selector(MainWindowController.zoomIn(_:)),
             #selector(MainWindowController.zoomOut(_:)),
             #selector(MainWindowController.zoomReset(_:)),
@@ -342,6 +377,9 @@ enum MenuBuilder {
             #selector(MainWindowController.transposeLine(_:)),
             #selector(MainWindowController.removeBlankLines(_:)),
             #selector(MainWindowController.toggleToolbar(_:)),
+            #selector(MainWindowController.formatJSON(_:)),
+            #selector(MainWindowController.minifyJSON(_:)),
+            #selector(MainWindowController.validateJSON(_:)),
             #selector(MainWindowController.closeOtherTabs(_:)),
             #selector(MainWindowController.closeAllTabs(_:)),
             #selector(MainWindowController.closeTabsToLeft(_:)),

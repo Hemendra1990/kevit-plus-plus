@@ -5,6 +5,8 @@ protocol TabBarViewDelegate: AnyObject {
     func tabBar(_ tabBar: TabBarView, didClose index: Int)
     func tabBar(_ tabBar: TabBarView, didReorder from: Int, to: Int)
     func tabBar(_ tabBar: TabBarView, perform action: TabBarAction, at index: Int)
+    /// Clicking the empty area beside the tabs requests a new tab.
+    func tabBarDidRequestNewTab(_ tabBar: TabBarView)
 }
 
 enum TabBarAction: Int {
@@ -83,6 +85,25 @@ final class TabBarView: NSView {
         let tab = tabViews[selectedIndex]
         tab.layoutSubtreeIfNeeded()
         scrollView.contentView.scrollToVisible(tab.frame)
+    }
+
+    /// A click counts as "empty area" only when it lands beyond the last tab
+    /// (or there are no tabs at all) — clicks anywhere within the tab region,
+    /// including gaps between tabs, are ignored to avoid accidents.
+    override func mouseDown(with event: NSEvent) {
+        let point = convert(event.locationInWindow, from: nil)
+        if shouldCreateTab(clickingAt: point) {
+            delegate?.tabBarDidRequestNewTab(self)
+        } else {
+            super.mouseDown(with: event)
+        }
+    }
+
+    func shouldCreateTab(clickingAt point: NSPoint) -> Bool {
+        guard let last = tabViews.last else { return true }
+        last.layoutSubtreeIfNeeded()
+        let frameInBar = convert(last.frame, from: last.superview)
+        return point.x > frameInBar.maxX + 2
     }
 }
 

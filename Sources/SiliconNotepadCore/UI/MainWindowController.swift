@@ -7,7 +7,14 @@ final class MainWindowController: NSWindowController, TabBarViewDelegate, Editor
     private let classicToolbar = ClassicToolbarView()
     let editor = EditorViewController()
     let drawing = DrawingViewController()
-    private let editorHost = NSView()
+    let markdownPreview = MarkdownPreviewViewController()
+    let htmlPreview = HTMLPreviewViewController()
+    let jsonPreview = JsonPreviewViewController()
+    let editorHost = NSView()
+    private let splitHost = NSView()
+    private let previewDivider = MarkdownDividerView(frame: .zero)
+    let markdownBar = MarkdownModeBar()
+    private let exitFullscreenButton = NSButton()
     private let findReplace = FindReplaceController()
     private let statusBar = StatusBarController()
     private let documentMap = DocumentMapView()
@@ -16,15 +23,30 @@ final class MainWindowController: NSWindowController, TabBarViewDelegate, Editor
     private let editorRow = NSStackView()
     private var documentMapWidth: NSLayoutConstraint!
     private var functionListWidth: NSLayoutConstraint!
+    private var splitConstraints: [NSLayoutConstraint] = []
+    private var previewPaneConstraint: NSLayoutConstraint?
     private var suppressEditorSync = false
     private var showDocumentMap = false
     private var showFunctionList = false
+    private var markdownMode: MarkdownViewMode = .code
+    private var splitOrientation: NSUserInterfaceLayoutOrientation = .horizontal
+    private var previewPaneWidth: CGFloat = 440
+    private var previewPaneHeight: CGFloat = 320
+    private var previewIsFullscreen = false
+    private var modeBeforeFullscreen: MarkdownViewMode = .split
+    private var hadWindowToolbarBeforeFullscreen = false
+    private var escEventMonitor: Any?
+    private var pendingSplitAdjust = false
+    private var markdownRenderWork: DispatchWorkItem?
+    private var lastRenderedMarkdown: String?
     private var mapRefreshTimer: Timer?
     private var compareWindows: [CompareWindowController] = []
     private var ftpWindow: FTPWindowController?
     private var pluginsMenu: NSMenu?
     private var editorToolbar: EditorToolbar?
     private var fileMonitorTimer: Timer?
+    private var sessionHeartbeatTimer: Timer?
+    private var sessionDebounceWork: DispatchWorkItem?
     private var pendingReloadPrompt = Set<UUID>()
 
     convenience init() {
@@ -42,7 +64,9 @@ final class MainWindowController: NSWindowController, TabBarViewDelegate, Editor
         window.delegate = self
         setupToolbar()
         setupUI()
-        if SessionManager.hasAutosave {
+        // Tests disable autosave handling to stay hermetic — restoring the
+        // developer's real session here made results machine-dependent.
+        if SessionManager.automaticAutosaveEnabled, SessionManager.hasAutosave {
             do {
                 let session = try SessionManager.load()
                 restoreSession(session)
@@ -81,6 +105,7 @@ final class MainWindowController: NSWindowController, TabBarViewDelegate, Editor
                 doc.isDirty = true
                 self.reloadTabs()
                 self.updateWindowTitle()
+                self.scheduleSessionAutosave()
             }
         }
 
@@ -107,12 +132,56 @@ final class MainWindowController: NSWindowController, TabBarViewDelegate, Editor
         documentMap.translatesAutoresizingMaskIntoConstraints = false
         functionList.translatesAutoresizingMaskIntoConstraints = false
 
+        // Editor + document previews (Markdown / HTML / JSON) live in
+        // splitHost; the mode layout below rebuilds its constraints for
+        // code / split / preview arrangements.
+        splitHost.translatesAutoresizingMaskIntoConstraints = false
+        markdownPreview.view.translatesAutoresizingMaskIntoConstraints = false
+        htmlPreview.view.translatesAutoresizingMaskIntoConstraints = false
+        jsonPreview.view.translatesAutoresizingMaskIntoConstraints = false
+        previewDivider.translatesAutoresizingMaskIntoConstraints = false
+        splitHost.addSubview(editorHost)
+        splitHost.addSubview(previewDivider)
+        splitHost.addSubview(markdownPreview.view)
+        splitHost.addSubview(htmlPreview.view)
+        splitHost.addSubview(jsonPreview.view)
+        htmlPreview.view.isHidden = true
+        jsonPreview.view.isHidden = true
+        previewDivider.onDrag = { [weak self] delta in
+            self?.adjustPreviewPane(by: delta)
+        }
+
+        // Floating exit control, only visible in fullscreen preview. Sits on
+        // splitHost so it floats above whichever preview is active.
+        exitFullscreenButton.bezelStyle = .circular
+        exitFullscreenButton.isBordered = true
+        exitFullscreenButton.toolTip = "Exit Fullscreen Preview (Esc or ⌥⌘F)"
+        exitFullscreenButton.image = NSImage(systemSymbolName: "xmark", accessibilityDescription: "Exit Fullscreen Preview")
+        exitFullscreenButton.imagePosition = .imageOnly
+        exitFullscreenButton.target = self
+        exitFullscreenButton.action = #selector(exitFullscreenPreview(_:))
+        exitFullscreenButton.translatesAutoresizingMaskIntoConstraints = false
+        exitFullscreenButton.isHidden = true
+        splitHost.addSubview(exitFullscreenButton)
+        NSLayoutConstraint.activate([
+            exitFullscreenButton.trailingAnchor.constraint(equalTo: splitHost.trailingAnchor, constant: -14),
+            exitFullscreenButton.topAnchor.constraint(equalTo: splitHost.topAnchor, constant: 14)
+        ])
+
+        markdownBar.translatesAutoresizingMaskIntoConstraints = false
+        markdownBar.onModeChange = { [weak self] mode in
+            self?.setMarkdownMode(mode)
+        }
+        markdownBar.onToggleFullscreen = { [weak self] in
+            self?.toggleFullscreenPreview(nil)
+        }
+
         editorRow.orientation = .horizontal
         editorRow.spacing = 0
         editorRow.distribution = .fill
         editorRow.translatesAutoresizingMaskIntoConstraints = false
         editorRow.addArrangedSubview(functionList)
-        editorRow.addArrangedSubview(editorHost)
+        editorRow.addArrangedSubview(splitHost)
         editorRow.addArrangedSubview(documentMap)
 
         functionListWidth = functionList.widthAnchor.constraint(equalToConstant: 0)
@@ -121,6 +190,8 @@ final class MainWindowController: NSWindowController, TabBarViewDelegate, Editor
         documentMapWidth.isActive = true
         functionList.isHidden = true
         documentMap.isHidden = true
+        previewDivider.isHidden = true
+        markdownPreview.view.isHidden = true
 
         contentStack.orientation = .vertical
         contentStack.spacing = 0
@@ -128,6 +199,7 @@ final class MainWindowController: NSWindowController, TabBarViewDelegate, Editor
         contentStack.translatesAutoresizingMaskIntoConstraints = false
         contentStack.addArrangedSubview(classicToolbar)
         contentStack.addArrangedSubview(tabBar)
+        contentStack.addArrangedSubview(markdownBar)
         contentStack.addArrangedSubview(editorRow)
         contentStack.addArrangedSubview(findReplace.view)
         contentStack.addArrangedSubview(statusBar.view)
@@ -138,6 +210,11 @@ final class MainWindowController: NSWindowController, TabBarViewDelegate, Editor
         tabBar.setContentHuggingPriority(.required, for: .vertical)
         tabBar.setContentCompressionResistancePriority(.required, for: .vertical)
         tabBar.heightAnchor.constraint(equalToConstant: 30).isActive = true
+        markdownBar.setContentHuggingPriority(.required, for: .vertical)
+        markdownBar.setContentCompressionResistancePriority(.required, for: .vertical)
+        markdownBar.isHidden = true
+
+        applyMarkdownLayout()
 
         let root = FileDropView()
         root.wantsLayer = false
@@ -170,6 +247,9 @@ final class MainWindowController: NSWindowController, TabBarViewDelegate, Editor
         fileMonitorTimer = Timer.scheduledTimer(withTimeInterval: 2.0, repeats: true) { [weak self] _ in
             self?.checkExternalFileChanges()
         }
+        sessionHeartbeatTimer = Timer.scheduledTimer(withTimeInterval: SessionManager.heartbeatInterval, repeats: true) { [weak self] _ in
+            self?.autosaveSession()
+        }
     }
 
     private func setupToolbar() {
@@ -185,6 +265,30 @@ final class MainWindowController: NSWindowController, TabBarViewDelegate, Editor
         NotificationCenter.default.addObserver(self, selector: #selector(prefsChanged), name: .preferencesDidChange, object: nil)
         NotificationCenter.default.addObserver(self, selector: #selector(themeChanged), name: .themeDidChange, object: nil)
         NotificationCenter.default.addObserver(self, selector: #selector(windowDidBecomeKey), name: NSWindow.didBecomeKeyNotification, object: window)
+        NotificationCenter.default.addObserver(self, selector: #selector(splitWindowDidResize(_:)), name: NSWindow.didResizeNotification, object: window)
+    }
+
+    /// Narrow windows stack editor and preview vertically instead of side by side.
+    /// During live window dragging this notification is delivered *inside* the
+    /// display-cycle layout pass; mutating constraints synchronously here threw
+    /// NSInternalInconsistencyException and crashed the app. All work is
+    /// coalesced onto the next runloop turn instead.
+    @objc private func splitWindowDidResize(_ notification: Notification) {
+        guard markdownMode == .split, !previewIsFullscreen else { return }
+        guard !pendingSplitAdjust else { return }
+        pendingSplitAdjust = true
+        DispatchQueue.main.async { [weak self] in
+            guard let self else { return }
+            self.pendingSplitAdjust = false
+            guard self.markdownMode == .split, !self.previewIsFullscreen else { return }
+            let target = self.currentSplitOrientation()
+            if target != self.splitOrientation {
+                self.splitOrientation = target
+                self.previewDivider.orientation = target
+                self.applyMarkdownLayout()
+            }
+            self.clampPreviewPaneToBounds()
+        }
     }
 
     @objc private func windowDidBecomeKey() {
@@ -211,6 +315,10 @@ final class MainWindowController: NSWindowController, TabBarViewDelegate, Editor
         statusBar.applyTheme(theme)
         documentMap.applyTheme(theme)
         functionList.applyTheme(theme)
+        markdownBar.applyTheme(theme)
+        previewDivider.applyTheme(theme)
+        markdownPreview.applyChromeTheme()
+        jsonPreview.applyChromeTheme()
         editor.applyFontAndTheme()
         drawing.applyChromeTheme()
         if store.activeDocument?.kind != .drawing {
@@ -308,6 +416,7 @@ final class MainWindowController: NSWindowController, TabBarViewDelegate, Editor
             }
             reloadTabs()
             updateStatus()
+            autosaveSession()
         } catch {
             showError(error)
         }
@@ -331,6 +440,7 @@ final class MainWindowController: NSWindowController, TabBarViewDelegate, Editor
                 self?.reloadTabs()
                 self?.updateStatus()
                 self?.updateWindowTitle()
+                self?.autosaveSession()
             } catch {
                 self?.showError(error)
             }
@@ -369,16 +479,17 @@ final class MainWindowController: NSWindowController, TabBarViewDelegate, Editor
         } else {
             presentActiveDocument()
         }
+        autosaveSession()
     }
 
     // MARK: - Window / quit
 
     func windowShouldClose(_ sender: NSWindow) -> Bool {
-        confirmDiscardChangesIfNeeded(allowCancel: true)
+        autosaveSession()
+        return true
     }
 
-    /// Prompts for every dirty document. Returns true when closing may proceed.
-    /// On "Don't Save" the document text is dropped so the autosaved session won't resurrect it.
+    /// Kept for tab-close flows that still prompt. Quit uses the session snapshot instead.
     func confirmDiscardChangesIfNeeded(allowCancel: Bool) -> Bool {
         syncActiveDocumentFromEditor()
         var discard: [Document] = []
@@ -437,7 +548,7 @@ final class MainWindowController: NSWindowController, TabBarViewDelegate, Editor
         return doc.plainDisplayName
     }
 
-    private func presentActiveDocument() {
+    func presentActiveDocument() {
         guard let doc = store.activeDocument else { return }
         if doc.kind == .drawing {
             editor.view.isHidden = true
@@ -449,6 +560,7 @@ final class MainWindowController: NSWindowController, TabBarViewDelegate, Editor
             documentMap.isHidden = true
             functionListWidth.constant = 0
             documentMapWidth.constant = 0
+            updateMarkdownChrome()
             reloadTabs()
             updateWindowTitle()
             updateStatus()
@@ -461,6 +573,7 @@ final class MainWindowController: NSWindowController, TabBarViewDelegate, Editor
         documentMap.isHidden = !showDocumentMap
         functionListWidth.constant = showFunctionList ? 200 : 0
         documentMapWidth.constant = showDocumentMap ? 96 : 0
+        updateMarkdownChrome()
         suppressEditorSync = true
         editor.rebuildEditor(languageID: doc.languageID)
         editor.string = doc.text
@@ -469,7 +582,11 @@ final class MainWindowController: NSWindowController, TabBarViewDelegate, Editor
         updateWindowTitle()
         updateStatus()
         refreshSidePanels()
-        window?.makeFirstResponder(editor.textView)
+        if previewIsFullscreen || markdownMode != .code {
+            window?.makeFirstResponder(markdownMode == .preview || previewIsFullscreen ? (activePreviewFirstResponder() ?? editor.textView) : editor.textView)
+        } else {
+            window?.makeFirstResponder(editor.textView)
+        }
     }
 
     private func syncActiveDocumentFromEditor() {
@@ -591,6 +708,10 @@ final class MainWindowController: NSWindowController, TabBarViewDelegate, Editor
     func tabBar(_ tabBar: TabBarView, didReorder from: Int, to: Int) {
         store.moveTab(from: from, to: to)
         reloadTabs()
+    }
+
+    func tabBarDidRequestNewTab(_ tabBar: TabBarView) {
+        newDocument(nil)
     }
 
     func tabBar(_ tabBar: TabBarView, perform action: TabBarAction, at index: Int) {
@@ -775,6 +896,7 @@ final class MainWindowController: NSWindowController, TabBarViewDelegate, Editor
             }
         }
         _ = store.close(at: index)
+        autosaveSession()
         return true
     }
 
@@ -786,9 +908,16 @@ final class MainWindowController: NSWindowController, TabBarViewDelegate, Editor
         doc.isDirty = true
         reloadTabs()
         updateStatus()
+        scheduleSessionAutosave()
         if showFunctionList { functionList.reload(text: editor.string) }
         if showDocumentMap {
             documentMap.update(text: editor.string, visibleLines: editor.visibleLineRange(), bookmarks: doc.bookmarks)
+        }
+        if previewIsFullscreen || markdownMode != .code {
+            scheduleMarkdownRender()
+        } else if !doc.isMarkdown {
+            // Typing Markdown into a plain tab should light up the mode bar.
+            scheduleMarkdownRender()
         }
     }
 
@@ -1011,6 +1140,8 @@ final class MainWindowController: NSWindowController, TabBarViewDelegate, Editor
         doc.isLanguageForced = true
         editor.setLanguage(doc.languageID)
         updateStatus()
+        // Switching an untitled document to Markdown makes it previewable.
+        renderMarkdownPreview(force: true)
     }
 
     // MARK: - View / Settings
@@ -1182,6 +1313,401 @@ final class MainWindowController: NSWindowController, TabBarViewDelegate, Editor
         refreshSidePanels()
     }
 
+    // MARK: - Document previews (Markdown / HTML / JSON)
+
+    /// Which viewer the preview pane hosts for a document.
+    enum PreviewKind: Equatable {
+        case none
+        case markdown
+        case html
+        case json
+    }
+
+    private func previewKind(for doc: Document) -> PreviewKind {
+        guard doc.kind != .drawing else { return .none }
+        if doc.isMarkdown || MarkdownDetector.looksLikeMarkdown(doc.text) {
+            return .markdown
+        }
+        if doc.isJSONDocument || doc.looksLikeJSONContent {
+            return .json
+        }
+        if doc.isHTMLDocument || doc.looksLikeHTMLContent {
+            return .html
+        }
+        return .none
+    }
+
+    /// True when the document may be rendered in the preview pane.
+    private func isPreviewable(_ doc: Document) -> Bool {
+        previewKind(for: doc) != .none
+    }
+
+    /// The pane view laid out on the preview side of the split.
+    private var activePreviewView: NSView {
+        guard let doc = store.activeDocument else { return markdownPreview.view }
+        switch previewKind(for: doc) {
+        case .html: return htmlPreview.view
+        case .json: return jsonPreview.view
+        default: return markdownPreview.view
+        }
+    }
+
+    private func renderIntoActivePreview(_ doc: Document) {
+        switch previewKind(for: doc) {
+        case .markdown:
+            markdownPreview.loadMarkdown(doc.text)
+        case .html:
+            htmlPreview.loadHTML(doc.text)
+        case .json:
+            jsonPreview.loadJSON(doc.text)
+        case .none:
+            break
+        }
+    }
+
+    private func notifyActivePreview() {
+        guard let doc = store.activeDocument else { return }
+        switch previewKind(for: doc) {
+        case .markdown: markdownPreview.notifyVisible()
+        case .html: htmlPreview.notifyVisible()
+        case .json: jsonPreview.notifyVisible()
+        case .none: break
+        }
+    }
+
+    private func activePreviewFirstResponder() -> NSResponder? {
+        guard let doc = store.activeDocument else { return nil }
+        switch previewKind(for: doc) {
+        case .html: return htmlPreview.webView
+        case .json: return jsonPreview.webView
+        default: return markdownPreview.webView
+        }
+    }
+
+    private func previewBadge(for doc: Document) -> (label: String, confirmed: Bool)? {
+        switch previewKind(for: doc) {
+        case .markdown:
+            return ("Markdown", doc.isMarkdown)
+        case .html:
+            return ("HTML", doc.isHTMLDocument)
+        case .json:
+            return ("JSON", doc.isJSONDocument)
+        case .none:
+            return nil
+        }
+    }
+
+    /// Whether Markdown UI (mode bar, preview menu items) should light up.
+    private var markdownUIEnabled: Bool {
+        previewIsFullscreen || markdownMode != .code
+            || (store.activeDocument.map { isPreviewable($0) } ?? false)
+    }
+
+    @objc func setMarkdownModeCommand(_ sender: NSMenuItem) {
+        guard let raw = sender.representedObject as? String,
+              let mode = MarkdownViewMode(rawValue: raw) else { return }
+        setMarkdownMode(mode)
+    }
+
+    func setMarkdownMode(_ mode: MarkdownViewMode) {
+        guard markdownUIEnabled else { return }
+        if previewIsFullscreen {
+            if mode == .code || mode == .preview {
+                // Fullscreen *is* preview-only; Code exits it entirely.
+                if mode == .code {
+                    markdownMode = .code
+                    exitFullscreenState()
+                    applyMarkdownChrome()
+                    window?.makeFirstResponder(editor.textView)
+                    return
+                }
+            }
+        }
+        markdownMode = mode
+        markdownBar.setMode(mode)
+        applyMarkdownLayout()
+        if mode != .code {
+            renderMarkdownPreview(force: true)
+            notifyActivePreview()
+            window?.makeFirstResponder(activePreviewFirstResponder() ?? editor.textView)
+        } else {
+            window?.makeFirstResponder(editor.textView)
+        }
+    }
+
+    /// ⇧⌘V — keeps the classic toggle feel: Code ↔ Split.
+    @objc func toggleMarkdownPreview(_ sender: Any? = nil) {
+        guard markdownUIEnabled else { return }
+        if previewIsFullscreen {
+            exitFullscreenPreview(nil)
+            return
+        }
+        setMarkdownMode(markdownMode == .split ? .code : .split)
+    }
+
+    @objc func toggleFullscreenPreview(_ sender: Any? = nil) {
+        guard markdownUIEnabled else { return }
+        if previewIsFullscreen {
+            exitFullscreenPreview(nil)
+        } else {
+            enterFullscreenPreview()
+        }
+    }
+
+    @objc func exitFullscreenPreview(_ sender: Any? = nil) {
+        guard previewIsFullscreen else { return }
+        markdownMode = modeBeforeFullscreen == .code ? .split : modeBeforeFullscreen
+        exitFullscreenState()
+        applyMarkdownChrome()
+        renderMarkdownPreview(force: true)
+        notifyActivePreview()
+        window?.makeFirstResponder(markdownPreviewModeFirstResponder())
+    }
+
+    private func markdownPreviewModeFirstResponder() -> NSResponder? {
+        markdownMode == .code ? editor.textView : (activePreviewFirstResponder() ?? editor.textView)
+    }
+
+    private func enterFullscreenPreview() {
+        modeBeforeFullscreen = markdownMode == .code ? .split : markdownMode
+        markdownMode = .preview
+        previewIsFullscreen = true
+        markdownBar.setFullscreen(true)
+        installEscMonitor()
+        hadWindowToolbarBeforeFullscreen = window?.toolbar != nil
+        window?.toolbar = nil
+        applyMarkdownChrome()
+        renderMarkdownPreview(force: true)
+        notifyActivePreview()
+        window?.makeFirstResponder(activePreviewFirstResponder() ?? editor.textView)
+    }
+
+    private func exitFullscreenState() {
+        previewIsFullscreen = false
+        markdownBar.setFullscreen(false)
+        removeEscMonitor()
+        if hadWindowToolbarBeforeFullscreen, window?.toolbar == nil {
+            window?.toolbar = editorToolbar?.makeToolbar()
+        }
+        hadWindowToolbarBeforeFullscreen = false
+    }
+
+    /// Esc while fullscreen preview is active exits it.
+    private func installEscMonitor() {
+        guard escEventMonitor == nil else { return }
+        escEventMonitor = NSEvent.addLocalMonitorForEvents(matching: .keyDown) { [weak self] event in
+            if event.keyCode == 53, let self, self.previewIsFullscreen {
+                self.exitFullscreenPreview(nil)
+                return nil
+            }
+            return event
+        }
+    }
+
+    private func removeEscMonitor() {
+        if let monitor = escEventMonitor {
+            NSEvent.removeMonitor(monitor)
+            escEventMonitor = nil
+        }
+    }
+
+    /// Mode bar visibility + detection badge (cheap enough for every switch).
+    private func updateMarkdownChrome() {
+        applyMarkdownChrome()
+        renderMarkdownPreview(force: true)
+        if previewIsFullscreen || markdownMode != .code {
+            markdownPreview.notifyVisible()
+        }
+    }
+
+    private func applyMarkdownChrome() {
+        let doc = store.activeDocument
+        let previewable = doc.map { isPreviewable($0) } ?? false
+        markdownBar.isHidden = !(previewable && !previewIsFullscreen)
+        markdownBar.setMode(markdownMode)
+        if let doc, let badge = previewBadge(for: doc) {
+            markdownBar.setBadge(kind: badge.label, confirmed: badge.confirmed)
+        }
+        applyMarkdownLayout()
+    }
+
+    /// The single place that decides which of editor / divider / preview is
+    /// visible and rebuilds splitHost's constraints to match. Hidden views
+    /// keep their constraints in a plain NSView, so the constraint set must
+    /// be rebuilt rather than just toggling `isHidden`.
+    private func applyMarkdownLayout() {
+        NSLayoutConstraint.deactivate(splitConstraints)
+        splitConstraints = []
+        previewPaneConstraint = nil
+
+        let drawingDoc = store.activeDocument?.kind == .drawing
+        let editorVisible = drawingDoc || (!previewIsFullscreen && markdownMode != .preview)
+        let previewVisible = !drawingDoc && (previewIsFullscreen || markdownMode != .code)
+        let splitVisible = !drawingDoc && !previewIsFullscreen && markdownMode == .split
+
+        let pane = activePreviewView
+        editorHost.isHidden = !editorVisible
+        previewDivider.isHidden = !splitVisible
+        markdownPreview.view.isHidden = !previewVisible || pane !== markdownPreview.view
+        htmlPreview.view.isHidden = !previewVisible || pane !== htmlPreview.view
+        jsonPreview.view.isHidden = !previewVisible || pane !== jsonPreview.view
+        exitFullscreenButton.isHidden = !previewIsFullscreen
+
+        if splitVisible {
+            splitOrientation = currentSplitOrientation()
+            previewDivider.orientation = splitOrientation
+            switch splitOrientation {
+            case .horizontal:
+                let paneSize = pane.widthAnchor.constraint(equalToConstant: previewPaneWidth)
+                paneSize.priority = .defaultHigh
+                previewPaneConstraint = paneSize
+                splitConstraints = [
+                    editorHost.leadingAnchor.constraint(equalTo: splitHost.leadingAnchor),
+                    editorHost.topAnchor.constraint(equalTo: splitHost.topAnchor),
+                    editorHost.bottomAnchor.constraint(equalTo: splitHost.bottomAnchor),
+                    editorHost.trailingAnchor.constraint(equalTo: previewDivider.leadingAnchor),
+                    previewDivider.widthAnchor.constraint(equalToConstant: 6),
+                    previewDivider.topAnchor.constraint(equalTo: splitHost.topAnchor),
+                    previewDivider.bottomAnchor.constraint(equalTo: splitHost.bottomAnchor),
+                    previewDivider.trailingAnchor.constraint(equalTo: pane.leadingAnchor),
+                    pane.trailingAnchor.constraint(equalTo: splitHost.trailingAnchor),
+                    pane.topAnchor.constraint(equalTo: splitHost.topAnchor),
+                    pane.bottomAnchor.constraint(equalTo: splitHost.bottomAnchor),
+                    paneSize
+                ]
+            case .vertical:
+                let paneSize = pane.heightAnchor.constraint(equalToConstant: previewPaneHeight)
+                paneSize.priority = .defaultHigh
+                previewPaneConstraint = paneSize
+                splitConstraints = [
+                    editorHost.leadingAnchor.constraint(equalTo: splitHost.leadingAnchor),
+                    editorHost.trailingAnchor.constraint(equalTo: splitHost.trailingAnchor),
+                    editorHost.topAnchor.constraint(equalTo: splitHost.topAnchor),
+                    editorHost.bottomAnchor.constraint(equalTo: previewDivider.topAnchor),
+                    previewDivider.heightAnchor.constraint(equalToConstant: 6),
+                    previewDivider.leadingAnchor.constraint(equalTo: splitHost.leadingAnchor),
+                    previewDivider.trailingAnchor.constraint(equalTo: splitHost.trailingAnchor),
+                    previewDivider.bottomAnchor.constraint(equalTo: pane.topAnchor),
+                    pane.leadingAnchor.constraint(equalTo: splitHost.leadingAnchor),
+                    pane.trailingAnchor.constraint(equalTo: splitHost.trailingAnchor),
+                    pane.bottomAnchor.constraint(equalTo: splitHost.bottomAnchor),
+                    paneSize
+                ]
+            @unknown default:
+                break
+            }
+            splitConstraints.append(
+                editorHost.widthAnchor.constraint(greaterThanOrEqualToConstant: 240)
+            )
+        } else if previewVisible {
+            splitConstraints = [
+                pane.leadingAnchor.constraint(equalTo: splitHost.leadingAnchor),
+                pane.trailingAnchor.constraint(equalTo: splitHost.trailingAnchor),
+                pane.topAnchor.constraint(equalTo: splitHost.topAnchor),
+                pane.bottomAnchor.constraint(equalTo: splitHost.bottomAnchor)
+            ]
+        } else {
+            splitConstraints = [
+                editorHost.leadingAnchor.constraint(equalTo: splitHost.leadingAnchor),
+                editorHost.trailingAnchor.constraint(equalTo: splitHost.trailingAnchor),
+                editorHost.topAnchor.constraint(equalTo: splitHost.topAnchor),
+                editorHost.bottomAnchor.constraint(equalTo: splitHost.bottomAnchor)
+            ]
+        }
+        NSLayoutConstraint.activate(splitConstraints)
+        // Fullscreen preview takes over the whole window: hide app chrome.
+        classicToolbar.isHidden = previewIsFullscreen
+        tabBar.isHidden = previewIsFullscreen
+        statusBar.view.isHidden = previewIsFullscreen
+        functionList.isHidden = previewIsFullscreen ? true : !showFunctionList
+        documentMap.isHidden = previewIsFullscreen ? true : !showDocumentMap
+    }
+
+    private func currentSplitOrientation() -> NSUserInterfaceLayoutOrientation {
+        // Account for the side panels so the split flips before it gets cramped.
+        let reserved: CGFloat = (showFunctionList ? 200 : 0) + (showDocumentMap ? 96 : 0)
+        let available = (window?.frame.width ?? 1100) - reserved
+        return available < 760 ? .vertical : .horizontal
+    }
+
+    /// Internal for the layout stress test; drag deltas come through here.
+    /// Positive delta = drag toward the preview (right / down). The preview is
+    /// pinned to the trailing/bottom edge, so dragging toward it shrinks it.
+    var previewPaneDebug: (constant: CGFloat?, stored: CGFloat, mode: String, orientation: String) {
+        (
+            previewPaneConstraint?.constant,
+            splitOrientation == .horizontal ? previewPaneWidth : previewPaneHeight,
+            markdownMode.rawValue,
+            splitOrientation == .horizontal ? "h" : "v"
+        )
+    }
+
+    var splitHostDebug: CGFloat { splitHost.bounds.width }
+
+    func adjustPreviewPane(by delta: CGFloat) {
+        guard markdownMode == .split, !previewIsFullscreen else { return }
+        let total: CGFloat
+        let current: CGFloat
+        if splitOrientation == .horizontal {
+            // Re-sync from the live frame so a shrunk window doesn't make the
+            // first drag jump.
+            current = markdownPreview.view.bounds.width
+            total = splitHost.bounds.width
+            previewPaneWidth = clampPaneSize(current - delta, total: total)
+            previewPaneConstraint?.constant = previewPaneWidth
+        } else {
+            current = markdownPreview.view.bounds.height
+            total = splitHost.bounds.height
+            previewPaneHeight = clampPaneSize(current - delta, total: total)
+            previewPaneConstraint?.constant = previewPaneHeight
+        }
+    }
+
+    private func clampPaneSize(_ value: CGFloat, total: CGFloat) -> CGFloat {
+        min(max(value, 220), max(220, total - 240))
+    }
+
+    private func clampPreviewPaneToBounds() {
+        guard markdownMode == .split, !previewIsFullscreen else { return }
+        if splitOrientation == .horizontal {
+            previewPaneWidth = clampPaneSize(markdownPreview.view.bounds.width, total: splitHost.bounds.width)
+            previewPaneConstraint?.constant = previewPaneWidth
+        } else {
+            previewPaneHeight = clampPaneSize(markdownPreview.view.bounds.height, total: splitHost.bounds.height)
+            previewPaneConstraint?.constant = previewPaneHeight
+        }
+    }
+
+    /// Pushes the active document through the preview pane. Non-previewable
+    /// documents show a friendly placeholder instead of raw text.
+    private func renderMarkdownPreview(force: Bool = false) {
+        guard let doc = store.activeDocument else { return }
+        guard previewKind(for: doc) != .none else {
+            markdownPreview.showPlaceholder(
+                glyph: "✎",
+                title: "Nothing to preview",
+                message: "Open a .md, .html, or .json document — or set its language — to see the rendered preview."
+            )
+            return
+        }
+        if !force, doc.text == lastRenderedMarkdown { return }
+        lastRenderedMarkdown = doc.text
+        renderIntoActivePreview(doc)
+    }
+
+    private func scheduleMarkdownRender() {
+        markdownRenderWork?.cancel()
+        let work = DispatchWorkItem { [weak self] in
+            guard let self else { return }
+            // Re-run detection first: typing Markdown into an untitled tab
+            // should light up the mode bar without a mode switch.
+            self.applyMarkdownChrome()
+            self.renderMarkdownPreview()
+        }
+        markdownRenderWork = work
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.25, execute: work)
+    }
+
     func documentMap(_ map: DocumentMapView, didRequestLine line: Int) {
         moveCaret(toLine: line)
     }
@@ -1194,6 +1720,7 @@ final class MainWindowController: NSWindowController, TabBarViewDelegate, Editor
 
     func captureSession() -> EditorSession {
         syncActiveDocumentFromEditor()
+        pullActiveDrawingIntoDocument()
         let tabs: [SessionTab] = store.documents.map { doc in
             SessionTab(
                 path: doc.fileURL?.path,
@@ -1212,7 +1739,8 @@ final class MainWindowController: NSWindowController, TabBarViewDelegate, Editor
             activeIndex: max(0, store.activeIndex),
             columnMode: editor.columnModeEnabled,
             showDocumentMap: showDocumentMap,
-            showFunctionList: showFunctionList
+            showFunctionList: showFunctionList,
+            showMarkdownPreview: markdownMode != .code
         )
     }
 
@@ -1260,6 +1788,7 @@ final class MainWindowController: NSWindowController, TabBarViewDelegate, Editor
             editor.columnModeEnabled = session.columnMode
             showDocumentMap = session.showDocumentMap
             showFunctionList = session.showFunctionList
+            markdownMode = session.showMarkdownPreview ? .split : .code
             documentMap.isHidden = !showDocumentMap
             functionList.isHidden = !showFunctionList
             documentMapWidth.constant = showDocumentMap ? 96 : 0
@@ -1311,7 +1840,27 @@ final class MainWindowController: NSWindowController, TabBarViewDelegate, Editor
     }
 
     func autosaveSession() {
+        guard SessionManager.automaticAutosaveEnabled else { return }
         try? SessionManager.save(captureSession())
+    }
+
+    private func scheduleSessionAutosave() {
+        guard SessionManager.automaticAutosaveEnabled else { return }
+        sessionDebounceWork?.cancel()
+        let work = DispatchWorkItem { [weak self] in
+            self?.autosaveSession()
+        }
+        sessionDebounceWork = work
+        DispatchQueue.main.asyncAfter(deadline: .now() + SessionManager.debounceInterval, execute: work)
+    }
+
+    private func pullActiveDrawingIntoDocument() {
+        guard let doc = store.activeDocument, doc.kind == .drawing else { return }
+        drawing.flushPendingChanges()
+        let json = drawing.lastSceneJSON
+        guard json != doc.text else { return }
+        doc.text = json
+        doc.isDirty = true
     }
 
     // MARK: - Macros
@@ -1392,6 +1941,8 @@ final class MainWindowController: NSWindowController, TabBarViewDelegate, Editor
     }
 
     func windowWillClose(_ notification: Notification) {
+        sessionDebounceWork?.cancel()
+        sessionHeartbeatTimer?.invalidate()
         autosaveSession()
         mapRefreshTimer?.invalidate()
         fileMonitorTimer?.invalidate()
@@ -1510,6 +2061,21 @@ final class MainWindowController: NSWindowController, TabBarViewDelegate, Editor
                 return
             }
             self.saveExportedData(data, ext: "svg", contentType: .svg)
+        }
+    }
+
+    /// Exports through the same renderer the preview pane uses, so the file
+    /// matches the on-screen rendering exactly.
+    @objc func exportMarkdownHTML(_ sender: Any? = nil) {
+        guard let doc = store.activeDocument, doc.kind != .drawing, doc.isMarkdown else { return }
+        syncActiveDocumentFromEditor()
+        markdownPreview.exportHTML(doc.text) { [weak self] html in
+            guard let self else { return }
+            guard let html, let data = html.data(using: .utf8) else {
+                NSSound.beep()
+                return
+            }
+            self.saveExportedData(data, ext: "html", contentType: .html)
         }
     }
 
@@ -1799,6 +2365,78 @@ final class MainWindowController: NSWindowController, TabBarViewDelegate, Editor
         }
     }
 
+    /// General-purpose comparator: paste two snippets and diff them live.
+    @objc func compareSnippets(_ sender: Any? = nil) {
+        let wc = CompareWindowController.snippets()
+        compareWindows.append(wc)
+        wc.showWindow(nil)
+    }
+
+    // MARK: - JSON tools
+
+    @objc func formatJSON(_ sender: Any? = nil) {
+        syncActiveDocumentFromEditor()
+        guard let doc = store.activeDocument, doc.kind != .drawing, isJSONish(doc) else {
+            NSSound.beep()
+            return
+        }
+        do {
+            let pretty = try JsonFormatter.pretty(doc.text)
+            editor.replaceDocument(pretty)
+            syncActiveDocumentFromEditor()
+            reloadTabs()
+            renderMarkdownPreview(force: true)
+        } catch {
+            showError(error)
+        }
+    }
+
+    @objc func minifyJSON(_ sender: Any? = nil) {
+        syncActiveDocumentFromEditor()
+        guard let doc = store.activeDocument, doc.kind != .drawing, isJSONish(doc) else {
+            NSSound.beep()
+            return
+        }
+        do {
+            let minified = try JsonFormatter.minify(doc.text)
+            editor.replaceDocument(minified)
+            syncActiveDocumentFromEditor()
+            reloadTabs()
+            renderMarkdownPreview(force: true)
+        } catch {
+            showError(error)
+        }
+    }
+
+    @objc func validateJSON(_ sender: Any? = nil) {
+        syncActiveDocumentFromEditor()
+        guard let doc = store.activeDocument, doc.kind != .drawing, isJSONish(doc) else {
+            NSSound.beep()
+            return
+        }
+        let alert = NSAlert()
+        if let error = JsonFormatter.validate(doc.text) {
+            alert.alertStyle = .critical
+            alert.messageText = "Invalid JSON"
+            alert.informativeText = error
+        } else {
+            alert.alertStyle = .informational
+            alert.messageText = "Valid JSON"
+            alert.informativeText = "The document parses successfully."
+        }
+        if let window {
+            alert.beginSheetModal(for: window)
+        } else {
+            alert.runModal()
+        }
+    }
+
+    /// Format/minify/validate apply to .json files, forced language, or any
+    /// document whose content actually parses as JSON.
+    private func isJSONish(_ doc: Document) -> Bool {
+        doc.isJSONDocument || doc.looksLikeJSONContent
+    }
+
     // MARK: - Plugins
 
     func refreshPluginsMenu(_ menu: NSMenu) {
@@ -1862,6 +2500,20 @@ final class MainWindowController: NSWindowController, TabBarViewDelegate, Editor
         switch menuItem.action {
         case #selector(exportDrawingPNG(_:)), #selector(exportDrawingSVG(_:)):
             return drawing
+        case #selector(exportMarkdownHTML(_:)):
+            return !drawing && (store.activeDocument?.isMarkdown ?? false)
+        case #selector(toggleMarkdownPreview(_:)), #selector(toggleFullscreenPreview(_:)):
+            return !drawing && markdownUIEnabled
+        case #selector(formatJSON(_:)), #selector(minifyJSON(_:)), #selector(validateJSON(_:)):
+            return !drawing && (store.activeDocument.map { isJSONish($0) } ?? false)
+        case #selector(setMarkdownModeCommand(_:)):
+            guard !drawing, markdownUIEnabled else { return false }
+            if let raw = menuItem.representedObject as? String {
+                menuItem.state = (markdownMode == MarkdownViewMode(rawValue: raw) && !previewIsFullscreen)
+                    || (previewIsFullscreen && raw == MarkdownViewMode.preview.rawValue)
+                    ? .on : .off
+            }
+            return true
         default:
             break
         }

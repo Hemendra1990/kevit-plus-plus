@@ -30,6 +30,16 @@ if [[ -d "$ROOT/Resources/Excalidraw" ]]; then
   cp -R "$ROOT/Resources/Excalidraw/." "$APP_DIR/Contents/Resources/Excalidraw/"
 fi
 
+if [[ -d "$ROOT/Resources/Markdown" ]]; then
+  mkdir -p "$APP_DIR/Contents/Resources/Markdown"
+  cp -R "$ROOT/Resources/Markdown/." "$APP_DIR/Contents/Resources/Markdown/"
+fi
+
+if [[ -d "$ROOT/Resources/JsonView" ]]; then
+  mkdir -p "$APP_DIR/Contents/Resources/JsonView"
+  cp -R "$ROOT/Resources/JsonView/." "$APP_DIR/Contents/Resources/JsonView/"
+fi
+
 if [[ -f "$ROOT/Resources/AppIcon.icns" ]]; then
   cp "$ROOT/Resources/AppIcon.icns" "$APP_DIR/Contents/Resources/AppIcon.icns"
   /usr/libexec/PlistBuddy -c "Add :CFBundleIconFile string AppIcon" "$APP_DIR/Contents/Info.plist" 2>/dev/null \

@@ -6,10 +6,28 @@ import WebKit
 @main
 enum LogicTestsMain {
     static func main() {
+        // Headless controllers must never rewrite ~/Library/.../LastSession.json.
+        SessionManager.automaticAutosaveEnabled = false
+
         // Opt-in: loads the bundled Excalidraw host in the embedded canvas and waits
         // for it to paint. Needs a window server, so it stays out of the default run.
         if CommandLine.arguments.contains("--drawing-render") {
             runDrawingRenderCheck()
+            return
+        }
+
+        // Opt-in: boots the Markdown preview host and pushes a kitchen-sink
+        // document through the real Swift -> JS render path. Window server
+        // required, so it stays out of the default run.
+        if CommandLine.arguments.contains("--markdown-render") {
+            runMarkdownRenderCheck()
+            return
+        }
+
+        // Opt-in: drives mode/fullscreen/resize transitions with real layout
+        // passes — Auto Layout exceptions crash here instead of in users' faces.
+        if CommandLine.arguments.contains("--md-stress") {
+            runMarkdownLayoutStress()
             return
         }
 
@@ -70,9 +88,164 @@ enum LogicTestsMain {
         let info = TextTransforms.characterInfo(at: 0, in: "A")
         check("char") { info?.code == 65 }
 
+        check("md-detect-ext") {
+            Document(fileURL: URL(fileURLWithPath: "/tmp/a.md")).isMarkdown
+                && Document(fileURL: URL(fileURLWithPath: "/tmp/A.MARKDOWN")).isMarkdown
+                && Document(fileURL: URL(fileURLWithPath: "/tmp/a.txt")).isMarkdown == false
+        }
+        check("md-detect-language") {
+            let doc = Document.newUntitled()
+            doc.languageID = "markdown"
+            return doc.isMarkdown
+        }
+        check("md-detect-drawing") { Document.newUntitledDrawing().isMarkdown == false }
+        check("md-session-legacy-decode") {
+            let legacy = #"{"tabs":[{"languageID":"plaintext","encoding":"UTF-8","eol":"Unix (LF)","caret":0,"bookmarks":[],"kind":"text"}],"activeIndex":0,"columnMode":false,"showDocumentMap":false,"showFunctionList":false}"#
+            let session = try? JSONDecoder().decode(EditorSession.self, from: Data(legacy.utf8))
+            return session?.showMarkdownPreview == false
+        }
+        check("md-session-roundtrip") {
+            let session = EditorSession(tabs: [], activeIndex: 0, showMarkdownPreview: true)
+            let data = try? JSONEncoder().encode(session)
+            let back = data.flatMap { try? JSONDecoder().decode(EditorSession.self, from: $0) }
+            return back?.showMarkdownPreview == true
+        }
+
+        check("md-heuristic-heading-list") {
+            MarkdownDetector.looksLikeMarkdown("# Title\n\nSome intro text here.\n\n- one\n- two\n- three\n")
+        }
+        check("md-heuristic-fenced") {
+            MarkdownDetector.looksLikeMarkdown("Intro line.\n\n```swift\nlet x = 1\n```\n")
+        }
+        check("md-heuristic-table") {
+            MarkdownDetector.looksLikeMarkdown("| a | b |\n| --- | --- |\n| 1 | 2 |\n")
+        }
+        check("md-heuristic-bold-link") {
+            MarkdownDetector.looksLikeMarkdown("See **the docs** and [this link](https://example.com) for more.")
+        }
+        check("md-heuristic-checklist") {
+            MarkdownDetector.looksLikeMarkdown("Chores:\n\n- [x] one\n- [ ] two\n")
+        }
+        check("md-heuristic-quote-hr") {
+            MarkdownDetector.looksLikeMarkdown("> quoted line\n\n---\n\n> another quote line\n")
+        }
+        check("md-heuristic-plain-prose") {
+            !MarkdownDetector.looksLikeMarkdown("Hello there, this is a plain note.\nI - think so anyway.\n* just some text\n1. maybe numbered\n")
+        }
+        check("md-heuristic-c-source") {
+            !MarkdownDetector.looksLikeMarkdown("#include <stdio.h>\nint main(void) {\n    printf(\"hi\");\n    return 0;\n}\n")
+        }
+        check("md-heuristic-python") {
+            !MarkdownDetector.looksLikeMarkdown("class Thing:\n    def __init__(self):\n        self.x = 1\n")
+        }
+        check("md-auto-language-on-open") {
+            let path = NSTemporaryDirectory() + "kevit-md-detect-\(UUID().uuidString).txt"
+            try? "# Notes\n\n- a\n- b\n\n```js\nlet x\n```\n".write(toFile: path, atomically: true, encoding: .utf8)
+            defer { try? FileManager.default.removeItem(atPath: path) }
+            let doc = try? Document.open(url: URL(fileURLWithPath: path))
+            return doc?.languageID == "markdown"
+        }
+
+        check("json-pretty-roundtrip") {
+            let raw = #"{"b":1,"a":[1,2,{"x":"y"}],"c":null}"#
+            let pretty = try? JsonFormatter.pretty(raw)
+            let back = try? JsonFormatter.minify(pretty ?? "")
+            // Pretty is canonical (sorted keys); round-trip preserves structure.
+            return pretty?.contains("\n") == true
+                && back != nil
+                && JsonDiff.compare(leftText: raw, rightText: back ?? "").changes.isEmpty
+        }
+        check("json-validate") {
+            JsonFormatter.validate(#"{"a":1}"#) == nil
+                && JsonFormatter.validate(#"{"a":}"#) != nil
+        }
+        check("json-diff-nested") {
+            let left = #"{"user":{"name":"Ann","age":30,"tags":["a","b"]},"ok":true}"#
+            let right = #"{"user":{"name":"Anna","age":30,"tags":["a","b","c"],"role":"admin"},"ok":false}"#
+            let result = JsonDiff.compare(leftText: left, rightText: right)
+            let paths = result.changes.map(\.path)
+            let kinds = result.changes.map(\.kind)
+            return paths.contains("$.user.name")
+                && paths.contains("$.user.tags[2]")
+                && paths.contains("$.user.role")
+                && paths.contains("$.ok")
+                && kinds.contains(.changed)
+                && kinds.contains(.added)
+                && result.changes.count == 4
+        }
+        check("json-diff-order-insensitive") {
+            let left = #"{"a":1,"b":2}"#
+            let right = #"{"b":2,"a":1}"#
+            return JsonDiff.compare(leftText: left, rightText: right).changes.isEmpty
+        }
+        check("json-diff-type-changed") {
+            let result = JsonDiff.compare(leftText: #"{"n":5}"#, rightText: #"{"n":"5"}"#)
+            return result.changes.count == 1
+                && result.changes[0].kind == .typeChanged
+                && result.changes[0].path == "$.n"
+        }
+        check("json-diff-array-tail-removed") {
+            let result = JsonDiff.compare(leftText: "[1,2,3]", rightText: "[1,2]")
+            return result.changes.count == 1
+                && result.changes[0].kind == .removed
+                && result.changes[0].path == "$[2]"
+        }
+        check("diff-large-fast") {
+            var lines: [String] = []
+            for i in 0..<50_000 { lines.append("line \(i) — filler content") }
+            lines[25_000] = "line 25000 — CHANGED"
+            let left = lines.joined(separator: "\n")
+            lines[25_000] = "line 25000 — changed again"
+            lines.append("brand new tail")
+            let right = lines.joined(separator: "\n")
+            let start = Date()
+            let hunks = DiffEngine.diff(left: left, right: right)
+            let elapsed = Date().timeIntervalSince(start)
+            let added = hunks.filter { $0.kind == .added }.count
+            let removed = hunks.filter { $0.kind == .removed }.count
+            return elapsed < 5 && added == 2 && removed == 1
+        }
+        check("html-doc-detection") {
+            let html = Document(fileURL: URL(fileURLWithPath: "/tmp/a.html"), text: "<p>hi</p>")
+            let doctype = Document(text: "<!DOCTYPE html><html><body>x</body></html>")
+            let plain = Document(text: "just plain text")
+            return html.isHTMLDocument && !html.looksLikeHTMLContent
+                && doctype.looksLikeHTMLContent && !doctype.isHTMLDocument
+                && !plain.looksLikeHTMLContent
+        }
+        check("json-doc-detection") {
+            let json = Document(fileURL: URL(fileURLWithPath: "/tmp/a.json"), text: "{}")
+            let content = Document(text: #"{"k":[1,2]}"#)
+            let notJson = Document(text: "{not json at all")
+            return json.isJSONDocument && json.looksLikeJSONContent
+                && content.looksLikeJSONContent && !content.isJSONDocument
+                && !notJson.looksLikeJSONContent
+        }
+        check("compare-snippets-window") {
+            let wc = CompareWindowController.snippets()
+            wc.leftTextForTesting = "a\nb\nc"
+            wc.rightTextForTesting = "a\nx\nc"
+            wc.recomputeNow()
+            guard wc.hunkCount == 4 else { return false }
+            wc.setJSONModeForTesting(true)
+            wc.leftTextForTesting = #"{"a":1}"#
+            wc.rightTextForTesting = #"{"a":2}"#
+            wc.recomputeNow()
+            return wc.changeCount == 1
+        }
+        check("tabbar-empty-click") {
+            let bar = TabBarView(frame: NSRect(x: 0, y: 0, width: 800, height: 30))
+            bar.reload(titles: ["one.md"], selectedIndex: 0)
+            bar.layoutSubtreeIfNeeded()
+            return bar.shouldCreateTab(clickingAt: NSPoint(x: 700, y: 15))
+                && !bar.shouldCreateTab(clickingAt: NSPoint(x: 2, y: 15))
+        }
+
         failed += runTabSwitchTests()
         failed += runGapFixTests()
         failed += runDrawingSurfaceTests()
+        failed += runMarkdownSurfaceTests()
+        failed += runPreviewSurfaceTests()
 
         if failed == 0 {
             print("All logic tests passed.")
@@ -579,6 +752,61 @@ enum LogicTestsMain {
         dController.newDrawing(nil)
         check("new-drawing-kind") { dController.store.activeDocument?.kind == .drawing }
 
+        let liveDrawingJSON = """
+        {"type":"excalidraw","version":2,"source":"t","elements":[{"id":"el1","type":"rectangle","x":1,"y":2,"width":3,"height":4}],"appState":{},"files":{}}
+        """
+        dController.drawing.loadScene(liveDrawingJSON)
+        let liveCapture = dController.captureSession()
+        check("session-drawing-live-json") {
+            liveCapture.tabs.last?.kind == "drawing"
+                && liveCapture.tabs.last?.untitledText?.contains("el1") == true
+        }
+
+        let snapDir = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        try? FileManager.default.createDirectory(at: snapDir, withIntermediateDirectories: true)
+        let snapURL = snapDir.appendingPathComponent("LastSession.json")
+        let untitledDirty = MainWindowController()
+        untitledDirty.store.closeAll()
+        untitledDirty.newDocument(nil)
+        untitledDirty.editor.applyText("unsaved buffer", selection: NSRange(location: 14, length: 0))
+        try? SessionManager.save(untitledDirty.captureSession(), to: snapURL)
+        let fromDisk = try? SessionManager.load(from: snapURL)
+        check("session-file-untitled-dirty") {
+            fromDisk?.tabs.first?.path == nil
+                && fromDisk?.tabs.first?.untitledText == "unsaved buffer"
+        }
+        let reloadCtrl = MainWindowController()
+        reloadCtrl.store.closeAll()
+        if let fromDisk {
+            reloadCtrl.restoreSession(fromDisk)
+        }
+        check("session-file-restore-untitled") {
+            reloadCtrl.store.documents.first?.fileURL == nil
+                && reloadCtrl.store.documents.first?.text == "unsaved buffer"
+                && reloadCtrl.store.documents.first?.isDirty == true
+        }
+
+        let emptyUntitled = MainWindowController()
+        emptyUntitled.store.closeAll()
+        emptyUntitled.newDocument(nil)
+        let emptySession = emptyUntitled.captureSession()
+        check("session-empty-untitled-tab") {
+            emptySession.tabs.count == 1
+                && emptySession.tabs.first?.path == nil
+                && emptyUntitled.store.documents.first?.kind == .text
+        }
+
+        let quitCtrl = MainWindowController()
+        quitCtrl.store.closeAll()
+        quitCtrl.newDocument(nil)
+        quitCtrl.editor.applyText("keep across quit", selection: NSRange(location: 16, length: 0))
+        let mayQuit = quitCtrl.windowShouldClose(quitCtrl.window!)
+        check("quit-no-prompt-keeps-dirty") {
+            mayQuit
+                && quitCtrl.store.activeDocument?.text == "keep across quit"
+                && quitCtrl.store.activeDocument?.isDirty == true
+        }
+
         check("host-mime-js") { LocalHostSchemeHandler.mimeType(forExtension: "js") == "text/javascript" }
         check("host-mime-woff2") { LocalHostSchemeHandler.mimeType(forExtension: "woff2") == "font/woff2" }
         check("host-mime-html") { LocalHostSchemeHandler.mimeType(forExtension: "html") == "text/html" }
@@ -638,5 +866,421 @@ enum LogicTestsMain {
         MacroRecorder.shared.stop()
 
         return failed
+    }
+
+    /// Pane visibility rules without needing the host to paint.
+    static func runMarkdownSurfaceTests() -> Int {
+        var failed = 0
+
+        func check(_ name: String, _ condition: () -> Bool) {
+            if condition() {
+                print("PASS \(name)")
+            } else {
+                print("FAIL \(name)")
+                failed += 1
+            }
+        }
+
+        _ = NSApplication.shared
+
+        let controller = MainWindowController()
+        controller.store.closeAll()
+
+        let doc = Document(fileURL: URL(fileURLWithPath: "/tmp/notes.md"), text: "# Hi")
+        controller.store.add(doc)
+        controller.presentActiveDocument()
+        check("md-pane-hidden-by-default") { controller.markdownPreview.view.isHidden }
+        check("md-modebar-visible-for-md") { !controller.markdownBar.isHidden }
+
+        controller.toggleMarkdownPreview(nil)
+        check("md-pane-visible-after-toggle") {
+            !controller.markdownPreview.view.isHidden
+        }
+        check("md-split-shows-both") {
+            !controller.editorHost.isHidden && !controller.markdownPreview.view.isHidden
+        }
+
+        controller.setMarkdownMode(.preview)
+        check("md-preview-mode-hides-editor") {
+            controller.editorHost.isHidden && !controller.markdownPreview.view.isHidden
+        }
+
+        // Fullscreen preview: pane fills the window, chrome rows hide.
+        controller.toggleFullscreenPreview(nil)
+        check("md-fullscreen-hides-chrome") {
+            controller.tabBar.isHidden
+                && controller.markdownBar.isHidden
+                && controller.editorHost.isHidden
+                && !controller.markdownPreview.view.isHidden
+        }
+        controller.exitFullscreenPreview(nil)
+        // Exiting returns to the mode we entered from (preview-only here).
+        check("md-fullscreen-exit-restores") {
+            !controller.tabBar.isHidden
+                && controller.editorHost.isHidden
+                && !controller.markdownPreview.view.isHidden
+        }
+
+        controller.setMarkdownMode(.code)
+        check("md-code-mode-hides-pane") {
+            controller.markdownPreview.view.isHidden && !controller.editorHost.isHidden
+        }
+
+        // Switching to a non-Markdown tab keeps the pane (placeholder state).
+        controller.setMarkdownMode(.split)
+        controller.newDocument(nil)
+        check("md-pane-stays-for-plain-doc") { !controller.markdownPreview.view.isHidden }
+
+        // Drawings take the whole editor row.
+        controller.newDrawing(nil)
+        check("md-pane-hidden-for-drawing") { controller.markdownPreview.view.isHidden }
+
+        // Heuristic detection lights the mode bar up for plain tabs.
+        controller.store.closeAll()
+        let detected = Document(text: "# Plan\n\n- [x] one\n- [ ] two\n\n```swift\nlet x = 1\n```\n")
+        controller.store.add(detected)
+        controller.presentActiveDocument()
+        check("md-modebar-detected") { !controller.markdownBar.isHidden }
+
+        controller.store.closeAll()
+        return failed
+    }
+
+    /// The preview pane hosts the right viewer per document kind.
+    static func runPreviewSurfaceTests() -> Int {
+        var failed = 0
+
+        func check(_ name: String, _ condition: () -> Bool) {
+            if condition() {
+                print("PASS \(name)")
+            } else {
+                print("FAIL \(name)")
+                failed += 1
+            }
+        }
+
+        _ = NSApplication.shared
+
+        let controller = MainWindowController()
+        controller.store.closeAll()
+
+        // HTML document: split shows the HTML preview, not the Markdown one.
+        let html = Document(fileURL: URL(fileURLWithPath: "/tmp/page.html"), text: "<h1>Hello</h1>")
+        controller.store.add(html)
+        controller.presentActiveDocument()
+        controller.toggleMarkdownPreview(nil)
+        check("preview-html-pane") {
+            !controller.htmlPreview.view.isHidden
+                && controller.markdownPreview.view.isHidden
+                && controller.jsonPreview.view.isHidden
+        }
+        check("preview-html-modebar") { !controller.markdownBar.isHidden }
+
+        // JSON document: split shows the JSON tree viewer.
+        let json = Document(fileURL: URL(fileURLWithPath: "/tmp/data.json"), text: #"{"a":[1,2,3],"b":{"c":true}}"#)
+        controller.store.add(json)
+        controller.presentActiveDocument()
+        check("preview-json-pane") {
+            !controller.jsonPreview.view.isHidden
+                && controller.markdownPreview.view.isHidden
+                && controller.htmlPreview.view.isHidden
+        }
+
+        // Format JSON rewrites the editor with pretty-printed text.
+        let compact = #"{"z":1,"a":{"deep":[1,2]}}"#
+        let json2 = Document(fileURL: URL(fileURLWithPath: "/tmp/data2.json"), text: compact)
+        controller.store.add(json2)
+        controller.presentActiveDocument()
+        controller.formatJSON(nil)
+        check("preview-json-format") {
+            controller.editor.string.contains("\n")
+                && controller.editor.string.contains("\"a\"")
+        }
+        controller.minifyJSON(nil)
+        check("preview-json-minify") {
+            (try? JsonFormatter.minify(controller.editor.string)) == controller.editor.string
+        }
+
+        controller.store.closeAll()
+        return failed
+    }
+
+    /// Kitchen-sink document exercising every preview feature at once.
+    private static let markdownSample = """
+    # Kevit++ Markdown
+
+    Some **bold**, *italic*, `inline code`, and a [long link](https://example.com/a/very/long/url/that/goes/on/and/on/and/on/forever/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa).
+
+    ## Code
+
+    ```swift
+    func greet(name: String) -> String {
+        let message = "Hello, \\(name)!"
+        return message // trailing comment
+    }
+    ```
+
+    ## Table
+
+    | Feature | Status | Notes |
+    | --- | --- | --- |
+    | Preview | done | renders live |
+    | Export | done | identical output |
+
+    > A plain blockquote with *emphasis*.
+
+    > [!WARNING]
+    > Callouts render as colored boxes.
+
+    ## Tasks
+
+    - [x] Preview pane
+    - [ ] Ship it
+
+    ![Icon](https://example.com/icon.png)
+    """
+
+    /// Loads the real Markdown host, renders through the Swift -> JS bridge,    /// then verifies the export matches the preview byte-for-byte.
+    static func runMarkdownRenderCheck() {
+        let app = NSApplication.shared
+        app.setActivationPolicy(.accessory)
+
+        let controller = MainWindowController()
+        controller.store.closeAll()
+        let doc = Document(fileURL: URL(fileURLWithPath: "/tmp/test.md"), text: markdownSample)
+        controller.store.add(doc)
+        controller.presentActiveDocument()
+        controller.toggleMarkdownPreview(nil)
+
+        let probe = """
+        (function () {
+          var c = document.getElementById('content');
+          return JSON.stringify({
+            ready: !!(window.snppIsReady && window.snppIsReady()),
+            h1: !!c.querySelector('h1'),
+            tableWrapped: !!c.querySelector('.table-wrap table'),
+            codeHighlighted: !!c.querySelector('pre code.hljs span'),
+            codeLang: !!c.querySelector('.code-lang'),
+            blockquote: !!c.querySelector('blockquote'),
+            callout: !!c.querySelector('blockquote.callout.warning .callout-title'),
+            checkboxChecked: !!c.querySelector('li.task-list-item.done input[checked]'),
+            checkboxOpen: !!c.querySelector('li.task-list-item input[type="checkbox"]:not([checked])'),
+            lazyImage: !!c.querySelector('img[loading="lazy"]'),
+            externalLink: !!c.querySelector('a[target="_blank"][rel~="noopener"]'),
+            html: c.innerHTML
+          });
+        })()
+        """
+
+        let deadline = Date().addingTimeInterval(30)
+        let markers = [
+            "h1", "tableWrapped", "codeHighlighted", "codeLang", "blockquote",
+            "callout", "checkboxChecked", "checkboxOpen", "lazyImage", "externalLink"
+        ]
+        func poll() {
+            controller.markdownPreview.webView.evaluateJavaScript(probe) { result, _ in
+                let json = (result as? String) ?? "{}"
+                let info = (try? JSONSerialization.jsonObject(with: Data(json.utf8))) as? [String: Any] ?? [:]
+                let ready = (info["ready"] as? Bool) == true
+                let markersReady = markers.filter { (info[$0] as? Bool) != true }.isEmpty
+                if ready, markersReady {
+                    print("PASS md-render-all-markers")
+                    verifyExportMatchesPreview(controller: controller, previewHTML: (info["html"] as? String) ?? "")
+                    return
+                }
+                guard Date() < deadline else {
+                    print("FAIL md-render-timeout ready=\(ready) \(json.prefix(300))")
+                    exit(1)
+                }
+                DispatchQueue.main.asyncAfter(deadline: .now() + 0.5, execute: poll)
+            }
+        }
+        DispatchQueue.main.asyncAfter(deadline: .now() + 1.0, execute: poll)
+        app.run()
+    }
+
+    /// The export must contain exactly the HTML the preview is showing.
+    private static func verifyExportMatchesPreview(controller: MainWindowController, previewHTML: String) {
+        controller.markdownPreview.exportHTML(markdownSample) { html in
+            guard let html else {
+                print("FAIL md-export-nil")
+                exit(1)
+            }
+            guard html.hasPrefix("<!DOCTYPE html>"), html.contains("<style>") else {
+                print("FAIL md-export-standalone")
+                exit(1)
+            }
+            print("PASS md-export-standalone \(html.count) chars")
+            guard let range = html.range(of: #"<main class="markdown-body" id="content">"#),
+                  let end = html[range.upperBound...].range(of: "</main>") else {
+                print("FAIL md-export-body-missing")
+                exit(1)
+            }
+            let exportedBody = String(html[range.upperBound ..< end.lowerBound])
+            if exportedBody == previewHTML {
+                print("PASS md-export-matches-preview (\(previewHTML.count) chars)")
+                // Handy for eyeballing the stylesheet: SNPP_MD_DUMP=/tmp/out.html
+                if let dump = ProcessInfo.processInfo.environment["SNPP_MD_DUMP"] {
+                    try? html.write(toFile: dump, atomically: true, encoding: .utf8)
+                    print("dumped export to \(dump)")
+                }
+                print("All markdown render checks passed.")
+                exit(0)
+            } else {
+                print("FAIL md-export-matches-preview")
+                print("preview: \(previewHTML.prefix(200))")
+                print("export : \(exportedBody.prefix(200))")
+                exit(1)
+            }
+        }
+    }
+
+    /// Mode/fullscreen/resize transitions with real layout passes — Auto
+    /// Layout exceptions crash here instead of in a user's face.
+    static func runMarkdownLayoutStress() {
+        let app = NSApplication.shared
+        app.setActivationPolicy(.accessory)
+
+        // Replay the user's real saved session (read-only) when present, so
+        // the restore path is exercised with genuine data.
+        let sessionURL = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask)[0]
+            .appendingPathComponent("KevitPlusPlus/LastSession.json")
+        if let session = try? SessionManager.load(from: sessionURL) {
+            print("replaying real session: \(session.tabs.count) tabs, split=\(session.showMarkdownPreview)")
+            let controller0 = MainWindowController()
+            controller0.restoreSession(session)
+            controller0.showWindow(nil)
+            controller0.window?.makeKeyAndOrderFront(nil)
+            controller0.window?.contentView?.layoutSubtreeIfNeeded()
+            print("restore laid out OK")
+        }
+
+        let controller = MainWindowController()
+        controller.store.closeAll()
+        let doc = Document(fileURL: URL(fileURLWithPath: "/tmp/notes.md"), text: "# Title\n\n- a\n- b\n\n```swift\nlet x = 1\n```\n")
+        controller.store.add(doc)
+        controller.presentActiveDocument()
+        controller.showWindow(nil)
+        controller.window?.makeKeyAndOrderFront(nil)
+        controller.window?.setContentSize(NSSize(width: 1100, height: 720))
+        controller.window?.contentView?.layoutSubtreeIfNeeded()
+
+        var step = 0
+        func doStep(_ name: String, _ block: () -> Void) {
+            step += 1
+            print("STEP \(step): \(name)")
+            block()
+            controller.window?.contentView?.layoutSubtreeIfNeeded()
+        }
+
+        DispatchQueue.main.async {
+            doStep("split") { controller.toggleMarkdownPreview(nil) }
+            doStep("side-panels-on") {
+                controller.toggleFunctionList(nil)
+                controller.toggleDocumentMap(nil)
+            }
+            doStep("resize-700-wide") { controller.window?.setContentSize(NSSize(width: 700, height: 720)) }
+            doStep("resize-1200-wide") { controller.window?.setContentSize(NSSize(width: 1200, height: 720)) }
+            doStep("drawing-tab") { controller.newDrawing(nil) }
+            doStep("back-to-md") {
+                if let idx = controller.store.documents.firstIndex(where: { $0.kind != .drawing }) {
+                    controller.store.setActiveIndex(idx)
+                    controller.presentActiveDocument()
+                }
+            }
+            doStep("preview-mode") { controller.setMarkdownMode(.preview) }
+            doStep("fullscreen") { controller.toggleFullscreenPreview(nil) }
+            doStep("resize-narrow-fullscreen") { controller.window?.setContentSize(NSSize(width: 640, height: 700)) }
+            doStep("exit-fullscreen") { controller.exitFullscreenPreview(nil) }
+            doStep("find-panel") { controller.showFindPanel(nil) }
+            doStep("code") { controller.setMarkdownMode(.code) }
+            doStep("split-again") { controller.toggleMarkdownPreview(nil) }
+            doStep("divider-drag") {
+                // A full drag gesture through the real callback, both ways.
+                for _ in 0..<20 { controller.adjustPreviewPane(by: 12) }
+                for _ in 0..<20 { controller.adjustPreviewPane(by: -12) }
+            }
+            doStep("divider-drag-direction") {
+                // Dragging toward the preview (positive delta) must SHRINK it.
+                // Measure the axis the split is actually using.
+                controller.window?.contentView?.layoutSubtreeIfNeeded()
+                let vertical = controller.previewPaneDebug.orientation == "v"
+                let before = vertical
+                    ? controller.markdownPreview.view.bounds.height
+                    : controller.markdownPreview.view.bounds.width
+                controller.adjustPreviewPane(by: 40)
+                controller.window?.contentView?.layoutSubtreeIfNeeded()
+                let after = vertical
+                    ? controller.markdownPreview.view.bounds.height
+                    : controller.markdownPreview.view.bounds.width
+                let ok = after < before
+                print("\(ok ? "PASS" : "FAIL") md-divider-direction(\(vertical ? "v" : "h")) \(Int(before)) -> \(Int(after))")
+                if !ok { exit(1) }
+            }
+            doStep("resize-short") { controller.window?.setContentSize(NSSize(width: 1000, height: 420)) }
+            doStep("resize-tiny-width") { controller.window?.setContentSize(NSSize(width: 640, height: 420)) }
+            doStep("done") {}
+
+            // Fuzz: every ordered pair/triple of transitions with a real
+            // runloop spin between them (debounces + display cycle included).
+            typealias Action = (String, () -> Void)
+            let actions: [Action] = [
+                ("split", { controller.toggleMarkdownPreview(nil) }),
+                ("mode-code", { controller.setMarkdownMode(.code) }),
+                ("mode-split", { controller.setMarkdownMode(.split) }),
+                ("mode-preview", { controller.setMarkdownMode(.preview) }),
+                ("fullscreen", { controller.toggleFullscreenPreview(nil) }),
+                ("exit-fs", { controller.exitFullscreenPreview(nil) }),
+                ("narrow", { controller.window?.setContentSize(NSSize(width: 650, height: 700)) }),
+                ("wide", { controller.window?.setContentSize(NSSize(width: 1200, height: 720)) }),
+                ("short", { controller.window?.setContentSize(NSSize(width: 900, height: 410)) }),
+                ("fnlist", { controller.toggleFunctionList(nil) }),
+                ("docmap", { controller.toggleDocumentMap(nil) }),
+                ("newdoc", { controller.newDocument(nil) }),
+                ("drawing", { controller.newDrawing(nil) }),
+                ("select0", {
+                    if !controller.store.isEmpty {
+                        controller.store.setActiveIndex(0)
+                        controller.presentActiveDocument()
+                    }
+                }),
+                ("type", { controller.editor.applyText("# typed\n\n- [x] item\n", selection: NSRange(location: 0, length: 0)) }),
+                ("drag", { controller.adjustPreviewPane(by: 30) })
+            ]
+            let spin: () -> Void = {
+                controller.window?.contentView?.layoutSubtreeIfNeeded()
+                RunLoop.current.run(until: Date().addingTimeInterval(0.06))
+            }
+            print("FUZZ pairs...")
+            for a in actions {
+                for b in actions {
+                    print("  \(a.0) -> \(b.0)")
+                    a.1(); spin()
+                    b.1(); spin()
+                }
+            }
+            // Live window-drag simulation: many small resizes crossing the
+            // vertical-split threshold, with display cycles running between —
+            // didResize fires mid-layout here exactly like a mouse drag.
+            print("FUZZ live-resize drag...")
+            for mode in [MarkdownViewMode.split, .preview, .code] {
+                controller.setMarkdownMode(mode)
+                var w: CGFloat = 1300
+                while w > 500 {
+                    w -= 17
+                    controller.window?.setContentSize(NSSize(width: w, height: 500 + (w / 3)))
+                    RunLoop.current.run(until: Date().addingTimeInterval(0.008))
+                }
+                while w < 1300 {
+                    w += 23
+                    controller.window?.setContentSize(NSSize(width: w, height: 500 + (w / 3)))
+                    RunLoop.current.run(until: Date().addingTimeInterval(0.008))
+                }
+                print("  live-resize ok in \(mode.rawValue)")
+            }
+            print("STRESS OK — all \(step) steps + fuzz laid out")
+            exit(0)
+        }
+        app.run()
     }
 }

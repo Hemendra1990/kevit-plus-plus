@@ -37,6 +37,51 @@ final class Document: NSObject {
         fileURL?.lastPathComponent ?? (kind == .drawing ? "Untitled Drawing" : "Untitled")
     }
 
+    /// True for `.md`-family files or any document whose language is forced to
+    /// Markdown — the cases where the preview pane can render it.
+    var isMarkdown: Bool {
+        guard kind != .drawing else { return false }
+        if let ext = fileURL?.pathExtension.lowercased(),
+           ["md", "markdown", "mdown", "mkd"].contains(ext) {
+            return true
+        }
+        return languageID == "markdown"
+    }
+
+    /// HTML by extension or language only (content detection lives in the
+    /// preview-kind heuristic, which reports it as "detected").
+    var isHTMLDocument: Bool {
+        guard kind != .drawing else { return false }
+        if let ext = fileURL?.pathExtension.lowercased(), ["html", "htm"].contains(ext) {
+            return true
+        }
+        return languageID == "html"
+    }
+
+    var isJSONDocument: Bool {
+        guard kind != .drawing else { return false }
+        if let ext = fileURL?.pathExtension.lowercased(), ext == "json" {
+            return true
+        }
+        return languageID == "json"
+    }
+
+    /// Strong content signal for extension-less HTML documents.
+    var looksLikeHTMLContent: Bool {
+        guard kind != .drawing else { return false }
+        let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+        return trimmed.hasPrefix("<!doctype html") || trimmed.hasPrefix("<html")
+    }
+
+    /// Parses as a JSON object/array — cheap enough for the preview heuristic
+    /// because it only runs for documents without a JSON extension.
+    var looksLikeJSONContent: Bool {
+        guard kind != .drawing, text.utf8.count < 2_000_000 else { return false }
+        let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard trimmed.hasPrefix("{") || trimmed.hasPrefix("[") else { return false }
+        return JsonFormatter.validate(text) == nil
+    }
+
     init(
         fileURL: URL? = nil,
         text: String = "",
@@ -107,7 +152,12 @@ final class Document: NSObject {
             )
         }
         let eol = EOLStyle.detect(in: detected.text)
-        let language = LanguageRegistry.shared.languageID(forFilename: url.lastPathComponent)
+        var language = LanguageRegistry.shared.languageID(forFilename: url.lastPathComponent)
+        // Files with no meaningful extension still deserve Markdown treatment
+        // (highlighting + preview) when their content clearly is Markdown.
+        if language == "plaintext", MarkdownDetector.looksLikeMarkdown(detected.text) {
+            language = "markdown"
+        }
         return Document(
             fileURL: url,
             text: detected.text,

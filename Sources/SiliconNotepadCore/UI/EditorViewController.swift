@@ -103,6 +103,17 @@ final class EditorViewController: NSViewController, STTextViewDelegate {
         rebuildEditor(languageID: languageID)
     }
 
+    /// Whole-document replacement for programmatic transforms (format/minify).
+    /// Neon highlights asynchronously and can hold attribute ranges from the
+    /// previous text; swapping the text view (the same path tab switches use)
+    /// avoids NSRangeException on out-of-bounds ranges.
+    func replaceDocument(_ newText: String) {
+        rebuildEditor(languageID: currentLanguageID)
+        string = newText
+        setSelectedRange(NSRange(location: 0, length: 0))
+        delegate?.editorDidChangeText(self)
+    }
+
     func zoomIn() {
         zoomFactor = min(zoomFactor + 0.1, 3.0)
         applyFontAndTheme()
@@ -226,11 +237,14 @@ final class EditorViewController: NSViewController, STTextViewDelegate {
     }
 
     func highlightBrace(at location: Int) {
-        if let old = braceHighlightRange {
+        let length = (string as NSString).length
+        // The old range can predate a whole-text replacement; clear only what
+        // still fits or NSTextStorage throws NSRangeException.
+        if let old = braceHighlightRange, old.location + old.length <= length {
             textView.addAttributes([.backgroundColor: NSColor.clear], range: old)
         }
         braceHighlightRange = BraceMatcher.matchingRange(at: location, in: string)
-        if let range = braceHighlightRange {
+        if let range = braceHighlightRange, range.location + range.length <= (string as NSString).length {
             textView.addAttributes([
                 .backgroundColor: NSColor.systemYellow.withAlphaComponent(0.35)
             ], range: range)
