@@ -2,9 +2,15 @@ import AppKit
 import UniformTypeIdentifiers
 import WebKit
 
-/// Serves the bundled Excalidraw host over a custom `snpphost://` scheme so the
-/// page can load its module bundles and assets as same-origin resources.
-/// (file:// module fetches require private WebKit keys that newer macOS removes.)
+/// Serves bundled web hosts (Excalidraw, Markdown preview) over a custom
+/// `snpphost://` scheme so pages can load their scripts and assets as
+/// same-origin resources. (file:// module fetches require private WebKit keys
+/// that newer macOS removes.)
+///
+/// Paths resolve against the bundle's `Resources` directory first — so
+/// `snpphost://markdown/index.html` finds `Resources/Markdown/index.html` —
+/// and fall back to `Resources/Excalidraw/`, which keeps the Excalidraw host's
+/// root-relative asset URLs (`/assets/...`) working unchanged.
 final class LocalHostSchemeHandler: NSObject, WKURLSchemeHandler {
     static let scheme = "snpphost"
 
@@ -15,8 +21,7 @@ final class LocalHostSchemeHandler: NSObject, WKURLSchemeHandler {
         guard
             let url = task.request.url,
             url.scheme == Self.scheme,
-            let dir = DrawingViewController.hostDirectory(),
-            let file = Self.fileURL(for: url, hostDirectory: dir),
+            let file = Self.resolveFile(for: url),
             let data = try? Data(contentsOf: file)
         else {
             task.didFailWithError(URLError(.fileDoesNotExist))
@@ -95,5 +100,41 @@ final class LocalHostSchemeHandler: NSObject, WKURLSchemeHandler {
             return nil
         }
         return file
+    }
+
+    /// First match across the Resources roots and the legacy Excalidraw root
+    /// (the Excalidraw host requests its assets with root-relative URLs).
+    static func resolveFile(for request: URL) -> URL? {
+        for dir in resourceDirectories() {
+            if let file = fileURL(for: request, hostDirectory: dir) {
+                return file
+            }
+        }
+        return nil
+    }
+
+    /// Candidate base directories: the Resources root plus the Excalidraw
+    /// subdir of each. The app bundle comes first, then the repo layout
+    /// (`swift run` has no bundle, so walk up from the cwd).
+    static func resourceDirectories() -> [URL] {
+        var roots: [URL] = []
+        if let resources = Bundle.main.resourceURL {
+            roots.append(resources)
+        }
+        roots.append(Bundle.main.bundleURL.appendingPathComponent("Contents/Resources"))
+        roots.append(URL(fileURLWithPath: FileManager.default.currentDirectoryPath).appendingPathComponent("Resources"))
+
+        var walk = URL(fileURLWithPath: FileManager.default.currentDirectoryPath)
+        for _ in 0..<8 {
+            roots.append(walk.appendingPathComponent("Resources"))
+            walk.deleteLastPathComponent()
+        }
+
+        var candidates: [URL] = []
+        for root in roots {
+            candidates.append(root)
+            candidates.append(root.appendingPathComponent("Excalidraw"))
+        }
+        return candidates
     }
 }
