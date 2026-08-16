@@ -19,6 +19,9 @@ final class Document: NSObject {
     var isLanguageForced: Bool = false
     /// 1-based bookmarked line numbers
     var bookmarks: Set<Int> = []
+    /// Transient per-tab preview arrangement (code/split/preview). Not part
+    /// of the session; new tabs start in .code so the editor is the default.
+    var viewModeHint: MarkdownViewMode?
 
     static let emptyDrawingJSON = """
     {"type":"excalidraw","version":2,"source":"app://kevitplusplus","elements":[],"appState":{"gridSize":null,"viewBackgroundColor":"#ffffff"},"files":{}}

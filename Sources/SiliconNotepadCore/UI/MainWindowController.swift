@@ -333,7 +333,15 @@ final class MainWindowController: NSWindowController, TabBarViewDelegate, Editor
 
     @objc func newDocument(_ sender: Any? = nil) {
         syncActiveDocumentFromEditor()
+        // A brand-new tab is for typing: leave any preview/fullscreen state
+        // and land on a blank editor. The previous tab's arrangement is
+        // remembered via its viewModeHint.
+        if previewIsFullscreen {
+            exitFullscreenState()
+            markdownBar.setFullscreen(false)
+        }
         let doc = Document.newUntitled()
+        doc.viewModeHint = .code
         store.add(doc)
         presentActiveDocument()
     }
@@ -573,6 +581,10 @@ final class MainWindowController: NSWindowController, TabBarViewDelegate, Editor
         documentMap.isHidden = !showDocumentMap
         functionListWidth.constant = showFunctionList ? 200 : 0
         documentMapWidth.constant = showDocumentMap ? 96 : 0
+        if doc.viewModeHint != markdownMode, let hint = doc.viewModeHint {
+            markdownMode = hint
+            markdownBar.setMode(hint)
+        }
         updateMarkdownChrome()
         suppressEditorSync = true
         editor.rebuildEditor(languageID: doc.languageID)
@@ -591,6 +603,9 @@ final class MainWindowController: NSWindowController, TabBarViewDelegate, Editor
 
     private func syncActiveDocumentFromEditor() {
         guard !suppressEditorSync, let doc = store.activeDocument else { return }
+        if doc.kind != .drawing {
+            doc.viewModeHint = markdownMode
+        }
         if doc.kind == .drawing {
             drawing.flushPendingChanges()
             if drawing.lastSceneJSON != doc.text {
@@ -751,7 +766,10 @@ final class MainWindowController: NSWindowController, TabBarViewDelegate, Editor
     }
 
     @objc func cloneTab(_ sender: Any? = nil) {
+        let sourceMode = store.activeDocument?.viewModeHint
         performTabAction(.clone, at: store.activeIndex)
+        // The clone opens with the same arrangement as its source tab.
+        store.activeDocument?.viewModeHint = sourceMode ?? markdownMode
     }
 
     @objc func copyFilePath(_ sender: Any? = nil) {
@@ -1424,6 +1442,9 @@ final class MainWindowController: NSWindowController, TabBarViewDelegate, Editor
             }
         }
         markdownMode = mode
+        if let doc = store.activeDocument, doc.kind != .drawing {
+            doc.viewModeHint = mode
+        }
         markdownBar.setMode(mode)
         applyMarkdownLayout()
         if mode != .code {
@@ -1457,6 +1478,9 @@ final class MainWindowController: NSWindowController, TabBarViewDelegate, Editor
     @objc func exitFullscreenPreview(_ sender: Any? = nil) {
         guard previewIsFullscreen else { return }
         markdownMode = modeBeforeFullscreen == .code ? .split : modeBeforeFullscreen
+        if let doc = store.activeDocument, doc.kind != .drawing {
+            doc.viewModeHint = markdownMode
+        }
         exitFullscreenState()
         applyMarkdownChrome()
         renderMarkdownPreview(force: true)
@@ -1471,6 +1495,9 @@ final class MainWindowController: NSWindowController, TabBarViewDelegate, Editor
     private func enterFullscreenPreview() {
         modeBeforeFullscreen = markdownMode == .code ? .split : markdownMode
         markdownMode = .preview
+        if let doc = store.activeDocument, doc.kind != .drawing {
+            doc.viewModeHint = .preview
+        }
         previewIsFullscreen = true
         markdownBar.setFullscreen(true)
         installEscMonitor()
@@ -1523,7 +1550,11 @@ final class MainWindowController: NSWindowController, TabBarViewDelegate, Editor
     private func applyMarkdownChrome() {
         let doc = store.activeDocument
         let previewable = doc.map { isPreviewable($0) } ?? false
-        markdownBar.isHidden = !(previewable && !previewIsFullscreen)
+        // Visible whenever the preview UI is engaged so Code is always one
+        // click away; hidden for drawings and for plain docs in code mode.
+        markdownBar.isHidden = previewIsFullscreen
+            || store.activeDocument?.kind == .drawing
+            || (markdownMode == .code && !previewable)
         markdownBar.setMode(markdownMode)
         if let doc, let badge = previewBadge(for: doc) {
             markdownBar.setBadge(kind: badge.label, confirmed: badge.confirmed)

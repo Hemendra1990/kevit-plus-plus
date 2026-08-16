@@ -926,10 +926,21 @@ enum LogicTestsMain {
             controller.markdownPreview.view.isHidden && !controller.editorHost.isHidden
         }
 
-        // Switching to a non-Markdown tab keeps the pane (placeholder state).
-        controller.setMarkdownMode(.split)
+        // A brand-new tab must land on a blank, typable editor — even when
+        // the window was in preview mode.
+        controller.setMarkdownMode(.preview)
         controller.newDocument(nil)
-        check("md-pane-stays-for-plain-doc") { !controller.markdownPreview.view.isHidden }
+        check("md-new-tab-blank-editor") {
+            !controller.editorHost.isHidden && controller.markdownPreview.view.isHidden
+        }
+
+        // The tab we came from keeps the arrangement it was left in
+        // (preview-only here) — per-tab memory, not a window global.
+        controller.store.setActiveIndex(0)
+        controller.presentActiveDocument()
+        check("md-tab-remembers-mode") {
+            !controller.markdownPreview.view.isHidden && controller.editorHost.isHidden
+        }
 
         // Drawings take the whole editor row.
         controller.newDrawing(nil)
