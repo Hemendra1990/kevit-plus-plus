@@ -16,6 +16,7 @@ Built with **Swift + AppKit**, **STTextView** (TextKit 2), and **Tree-sitter** s
 - Side-by-side comparator with synced scrolling, add/remove/modify highlighting, and structural JSON diffing with change paths (Compare Snippets…, Text/JSON modes)
 - Format / Minify / Validate JSON (⌥⌘L, ⌥⌘M)
 - Click the empty area of the tab strip to open a new tab
+- String Workbench (⌥⌘T): 36 chained string operations — case, lines, regex, affixes, encodings, counts — with live output, undo, and per-step parameters
 - Plus all v1.3 features (FTP, plugins, compare, sessions, macros, …)
 
 ## Requirements
@@ -73,6 +74,7 @@ swift run LogicTests
 | Markdown: fullscreen preview | ⌥⌘F (Esc exits) |
 | Format JSON | ⌥⌘L |
 | Minify JSON | ⌥⌘M |
+| String Workbench | ⌥⌘T |
 | Toggle bookmark | ⇧⌘B |
 | Playback macro | ⇧⌘P |
 | Print | ⌘P |

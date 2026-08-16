@@ -234,6 +234,15 @@ enum MenuBuilder {
         macro.addItem(withTitle: "Playback", action: #selector(MainWindowController.playbackMacro(_:)), keyEquivalent: "p")
         if let item = macro.items.last { item.keyEquivalentModifierMask = [.command, .shift] }
 
+        // Tools
+        let toolsItem = NSMenuItem()
+        main.addItem(toolsItem)
+        let tools = NSMenu(title: "Tools")
+        toolsItem.submenu = tools
+        tools.addItem(withTitle: "String Workbench…", action: #selector(MainWindowController.showStringWorkbench(_:)), keyEquivalent: "t")
+        if let item = tools.items.last { item.keyEquivalentModifierMask = [.command, .option] }
+        tools.addItem(withTitle: "Compare Snippets…", action: #selector(MainWindowController.compareSnippets(_:)), keyEquivalent: "")
+
         // Plugins
         let pluginsItem = NSMenuItem()
         main.addItem(pluginsItem)

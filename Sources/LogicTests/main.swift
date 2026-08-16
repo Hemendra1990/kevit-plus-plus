@@ -241,6 +241,103 @@ enum LogicTestsMain {
                 && !bar.shouldCreateTab(clickingAt: NSPoint(x: 2, y: 15))
         }
 
+        check("strop-case-transforms") {
+            StringOperationKind.uppercase.apply("Hello World").value == "HELLO WORLD"
+                && StringOperationKind.lowercase.apply("HeLLo").value == "hello"
+                && StringOperationKind.titleCase.apply("hello wORLD aGAIN").value == "Hello World Again"
+                && StringOperationKind.sentenceCase.apply("hello WORLD. again NOW! ok").value == "Hello world. Again now! Ok"
+                && StringOperationKind.reverseText.apply("abc 😀").value == "😀 cba"
+        }
+        check("strop-space-and-lines") {
+            StringOperationKind.trimWhitespace.apply("  a b  \n  c  ").value == "a b\nc"
+                && StringOperationKind.removeExtraSpaces.apply("a   b \t\t c").value == "a b c"
+                && StringOperationKind.removeBlankLines.apply("a\n\n\nb").value == "a\nb"
+                && StringOperationKind.removeDuplicateLines.apply("b\na\nb\na").value == "b\na"
+                && StringOperationKind.sortLinesAZ.apply("c\na\nb").value == "a\nb\nc"
+                && StringOperationKind.sortLinesZA.apply("c\na\nb").value == "c\nb\na"
+        }
+        check("strop-find-replace") {
+            StringOperationKind.findReplace.apply("Cat cat CAT", parameter: "cat", secondary: "dog", flag: false).value == "dog dog dog"
+                && StringOperationKind.findReplace.apply("Cat cat", parameter: "cat", secondary: "dog", flag: true).value == "Cat dog"
+        }
+        check("strop-regex") {
+            StringOperationKind.regexReplace.apply("a1b22c333", parameter: #"\d+"#, secondary: "#").value == "a#b#c#"
+                && StringOperationKind.regexReplace.apply("abc", parameter: "x(", secondary: "#").isFailure
+                && StringOperationKind.regexExtract.apply("id=12; id=34", parameter: #"id=(\d+)"#).value == "12\n34"
+                && StringOperationKind.regexExtract.apply("a a b", parameter: #"\w"#, flag: true).value == "a\nb"
+        }
+        check("strop-affixes-quotes") {
+            StringOperationKind.addPrefix.apply("a\nb", parameter: "- ").value == "- a\n- b"
+                && StringOperationKind.removePrefix.apply("- a\n- b", parameter: "- ").value == "a\nb"
+                && StringOperationKind.addSuffix.apply("a\nb", parameter: ";").value == "a;\nb;"
+                && StringOperationKind.removeSuffix.apply("a;\nb;", parameter: ";").value == "a\nb"
+                && StringOperationKind.addQuotes.apply("a\nb").value == "\"a\"\n\"b\""
+                && StringOperationKind.removeQuotes.apply("'a'\n'b'", parameter: "'").value == "a\nb"
+        }
+        check("strop-join-split-eol") {
+            StringOperationKind.joinLines.apply("a\nb\nc").value == "a b c"
+                && StringOperationKind.joinLines.apply("a\nb", parameter: ", ").value == "a, b"
+                && StringOperationKind.splitByDelimiter.apply("a,b,c", parameter: ",").value == "a\nb\nc"
+                && StringOperationKind.lineEndingsLF.apply("a\r\nb").value == "a\nb"
+                && StringOperationKind.lineEndingsCRLF.apply("a\nb").value == "a\r\nb"
+        }
+        check("strop-encode-roundtrips") {
+            let text = "line1\nline2 \"quoted\" <tag> & http://x.y/a b?c=d"
+            let escaped = StringOperationKind.escapeCharacters.apply(text).value ?? ""
+            return StringOperationKind.unescapeCharacters.apply(escaped).value == text
+        }
+        check("strop-base64-url-html") {
+            let text = "héllo wörld 😀"
+            let b64 = StringOperationKind.base64Encode.apply(text).value ?? ""
+            return StringOperationKind.base64Decode.apply(b64).value == text
+                && StringOperationKind.base64Decode.apply("!!!not base64!!!").isFailure
+                && StringOperationKind.urlDecode.apply(StringOperationKind.urlEncode.apply("a b&c/d?e=f").value ?? "").value == "a b&c/d?e=f"
+                && StringOperationKind.htmlUnescape.apply(StringOperationKind.htmlEscape.apply("<a href=\"x\">&'").value ?? "").value == "<a href=\"x\">&'"
+        }
+        check("strop-counts") {
+            (StringOperationKind.countCharacters.apply("héllo").value ?? "").contains("Characters (grapheme clusters): 5")
+                && (StringOperationKind.countWords.apply("one two  three").value ?? "").contains("Words: 3")
+                && (StringOperationKind.countLines.apply("a\n\nb").value ?? "").contains("Lines: 3")
+                && (StringOperationKind.countSentences.apply("One. Two! Three? four").value ?? "").contains("Sentences: 4")
+        }
+        check("strop-chain-example") {
+            // Trim → Remove duplicate lines → Sort → Uppercase
+            var chain = StringOperationChain()
+            chain.append(StringChainStep(kind: .trimWhitespace))
+            chain.append(StringChainStep(kind: .removeDuplicateLines))
+            chain.append(StringChainStep(kind: .sortLinesAZ))
+            chain.append(StringChainStep(kind: .uppercase))
+            return chain.evaluate("  banana \n apple \n banana \n  cherry ").value == "APPLE\nBANANA\nCHERRY"
+        }
+        check("strop-chain-reorder-remove") {
+            var chain = StringOperationChain()
+            chain.append(StringChainStep(kind: .uppercase))
+            chain.append(StringChainStep(kind: .addPrefix, parameter: "> "))
+            chain.move(from: 1, to: 0)
+            guard chain.steps.map(\.kind) == [.addPrefix, .uppercase] else { return false }
+            chain.remove(at: 0)
+            return chain.evaluate("hi").value == "HI"
+        }
+        check("strop-chain-error-names-step") {
+            var chain = StringOperationChain()
+            chain.append(StringChainStep(kind: .uppercase))
+            chain.append(StringChainStep(kind: .regexReplace, parameter: "("))
+            guard case .failure(let error) = chain.evaluate("x") else { return false }
+            return error.message.contains("Step 2")
+        }
+        check("strop-workbench-window") {
+            let wc = StringWorkbenchWindowController()
+            wc.inputForTesting = "b\na\nb"
+            wc.chainForTesting = StringOperationChain(steps: [
+                StringChainStep(kind: .removeDuplicateLines),
+                StringChainStep(kind: .sortLinesAZ)
+            ])
+            wc.recomputeNow()
+            // recomputeNow dispatches async; give the main queue a beat.
+            RunLoop.current.run(until: Date().addingTimeInterval(0.3))
+            return wc.outputForTesting == "a\nb" && wc.errorForTesting.isEmpty
+        }
+
         failed += runTabSwitchTests()
         failed += runGapFixTests()
         failed += runDrawingSurfaceTests()
@@ -1294,4 +1391,9 @@ enum LogicTestsMain {
         }
         app.run()
     }
+}
+
+extension Result {
+    var value: Success? { try? get() }
+    var isFailure: Bool { if case .failure = self { return true } else { return false } }
 }

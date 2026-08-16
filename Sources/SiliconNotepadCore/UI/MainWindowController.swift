@@ -42,6 +42,7 @@ final class MainWindowController: NSWindowController, TabBarViewDelegate, Editor
     private var mapRefreshTimer: Timer?
     private var compareWindows: [CompareWindowController] = []
     private var ftpWindow: FTPWindowController?
+    private var stringWorkbench: StringWorkbenchWindowController?
     private var pluginsMenu: NSMenu?
     private var editorToolbar: EditorToolbar?
     private var fileMonitorTimer: Timer?
@@ -2394,6 +2395,13 @@ final class MainWindowController: NSWindowController, TabBarViewDelegate, Editor
             self.compareWindows.append(wc)
             wc.showWindow(nil)
         }
+    }
+
+    /// String Manipulation tool: input → operation chain → output.
+    @objc func showStringWorkbench(_ sender: Any? = nil) {
+        let workbench = stringWorkbench ?? StringWorkbenchWindowController()
+        stringWorkbench = workbench
+        workbench.showWindow(nil)
     }
 
     /// General-purpose comparator: paste two snippets and diff them live.
