@@ -1,0 +1,24 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>JSON Viewer</title>
+  <link rel="stylesheet" href="jsonview.css">
+  <script src="jsonview.js"></script>
+</head>
+<body>
+  <div class="toolbar">
+    <input id="search" type="search" placeholder="Search keys and values…" spellcheck="false">
+    <div class="match-nav">
+      <span id="match-count">0 matches</span>
+      <button id="prev-match" title="Previous match">↑</button>
+      <button id="next-match" title="Next match">↓</button>
+    </div>
+    <button id="expand-all" title="Expand every node">Expand</button>
+    <button id="collapse-all" title="Collapse to depth 2">Collapse</button>
+  </div>
+  <div id="content" class="json-tree"></div>
+  <div id="breadcrumb" class="breadcrumb"></div>
+</body>
+</html>
