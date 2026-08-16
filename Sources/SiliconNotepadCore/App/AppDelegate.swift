@@ -35,10 +35,10 @@ public final class AppDelegate: NSObject, NSApplicationDelegate {
         true
     }
 
-    /// Cmd+Q must not silently discard unsaved changes.
+    /// Unsaved buffers live in the session snapshot — quit without a Save prompt.
     public func applicationShouldTerminate(_ sender: NSApplication) -> NSApplication.TerminateReply {
-        guard let windowController = mainWindowController else { return .terminateNow }
-        return windowController.confirmDiscardChangesIfNeeded(allowCancel: true) ? .terminateNow : .terminateCancel
+        mainWindowController?.autosaveSession()
+        return .terminateNow
     }
 
     public func applicationSupportsSecureRestorableState(_ app: NSApplication) -> Bool {

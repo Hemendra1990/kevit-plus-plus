@@ -65,23 +65,49 @@ public struct EditorSession: Codable, Equatable {
     public var columnMode: Bool
     public var showDocumentMap: Bool
     public var showFunctionList: Bool
+    public var showMarkdownPreview: Bool
 
     public init(
         tabs: [SessionTab],
         activeIndex: Int,
         columnMode: Bool = false,
         showDocumentMap: Bool = false,
-        showFunctionList: Bool = false
+        showFunctionList: Bool = false,
+        showMarkdownPreview: Bool = false
     ) {
         self.tabs = tabs
         self.activeIndex = activeIndex
         self.columnMode = columnMode
         self.showDocumentMap = showDocumentMap
         self.showFunctionList = showFunctionList
+        self.showMarkdownPreview = showMarkdownPreview
+    }
+
+    enum CodingKeys: String, CodingKey {
+        case tabs, activeIndex, columnMode, showDocumentMap, showFunctionList, showMarkdownPreview
+    }
+
+    public init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        tabs = try container.decode([SessionTab].self, forKey: .tabs)
+        activeIndex = try container.decode(Int.self, forKey: .activeIndex)
+        columnMode = try container.decode(Bool.self, forKey: .columnMode)
+        showDocumentMap = try container.decode(Bool.self, forKey: .showDocumentMap)
+        showFunctionList = try container.decode(Bool.self, forKey: .showFunctionList)
+        // Sessions written before the Markdown preview existed must keep decoding.
+        showMarkdownPreview = try container.decodeIfPresent(Bool.self, forKey: .showMarkdownPreview) ?? false
     }
 }
 
 public enum SessionManager {
+    /// Debounce after edits before rewriting LastSession.json.
+    public static let debounceInterval: TimeInterval = 2
+    /// Heartbeat so a crash still has a recent snapshot.
+    public static let heartbeatInterval: TimeInterval = 7
+    /// Tests set this false so MainWindowController never touches the real
+    /// autosave file — neither reading it at launch nor writing it later.
+    public static var automaticAutosaveEnabled = true
+
     private static var autosaveURL: URL {
         let appSupport = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask).first!
         let dir = appSupport.appendingPathComponent(AppIdentity.supportFolder, isDirectory: true)
